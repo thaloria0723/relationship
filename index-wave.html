@@ -63,7 +63,7 @@
         vigAmp: 0.055, // 四角暗角
 
         // —— 液滴层（同色系凝胶滴，浮于水面）——
-        dropCount: 1, // ★试验：单颗水滴验证统一高度场方案（通过后改回 8）
+        dropCount: 8, // 铺开（单颗试验已验收：统一高度场 + P1-P4 全部通过）
         dropSizeMin: 0.055, // 最小半径 / 短边
         dropSizeMax: 0.115, // 最大半径 / 短边
         dropShadowAmp: 0.18, // （旧贴图式投影，已弃用，保留参数位）
@@ -73,7 +73,7 @@
 
         // —— 统一高度场（液滴=水面形变，光影由形变推导）——
         domeH: 0.55, // dome 峰高 / 半径（真实坐滴接触角高，透镜要陡才有水感）
-        meniscusH: 0.035, // （弯月面已从高度场删去，保留参数位；接触暗部由 P4 投影表达）
+        meniscusH: 0.035, // 弯月面凹陷深度 / 半径（加深让嵌入感更明显）
         refractStrength: 0.035, // 水底波纹被形变场偏折的强度（短边比例/单位斜率）
         focusGain: 0.75, // 光会聚度增益（散度→明暗；验收调整：液滴周光影减弱）
         lensDepth: 3.2, // 液滴透镜的等效水深 / 半径（深→内部纹理位移大、有倒立像感）
@@ -102,7 +102,9 @@
       // ---- 液滴布点（模块级生成，烘焙进 shader 常量；可复现伪随机）----
       // 位置=宽/高比例（resize 安全），半径=短边比例，w=相位；避让距离按名义宽高比 1.6 估算
       const DROPS = (() => {
-        let seed = 20260904;
+        // seed 经扫描选定：8 颗全部 try 内落位（无 40 次退化强放）、最小间距比 2.26、影子不被屏底裁切
+        // ⚠ 改 dropCount / 尺寸范围后需重新验证避让
+        let seed = 20260948;
         const rand = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
         const list = [];
         for (let i = 0; i < CONFIG.dropCount; i++) {
@@ -286,9 +288,7 @@ vec2 dropCenterPx(vec4 d, float t) {
 }
 
 // ---- 统一高度场（液滴=水面的一部分）----
-// dome 隆起的解析梯度（px 单位：高度px/水平px），随起伏动画同步
-// （弯月面梯度已删：它的散度尖峰产生径向对称"接触新月影"，太假；
-//   贴边暗部由 P4 投影接管，弯月面聚光形态由独立的接触亮线分支表达）
+// dome 隆起 + 弯月面凹陷的解析梯度（px 单位：高度px/水平px），随起伏动画同步
 vec2 dropFieldGrad(vec2 px, float mn, float t) {
   vec2 g = vec2(0.0);
   for (int i = 0; i < DROP_COUNT; i++) {
@@ -298,10 +298,16 @@ vec2 dropFieldGrad(vec2 px, float mn, float t) {
     vec2 rel = (px - dropCenterPx(d, t)) / r;
     float dist = length(rel);
     if (dist > 2.2) continue;
+    vec2 dir = rel / max(dist, 1e-4);
     if (dist < 1.0) {
       // dome：h = DOME_H·r·(1-d²)²，接触线斜率为零（与水面连续）
       g += rel * (-4.0 * DOME_H * (1.0 - dist * dist)) / r;
     }
+    // 弯月面：贴接触线的柔和凹陷（加宽=过渡柔和，加深=嵌入感）
+    // 110→36（验收：接触新月影太假——加宽羽化到隐约融入 P4 投影核；值与导数两处必须同步）
+    float ring = dist - 1.03;
+    float men = -MENI_H * r * exp(-ring * ring * 36.0);
+    g += dir * (men * -2.0 * ring * 36.0 / r);
   }
   return g;
 }
@@ -331,7 +337,8 @@ float lightField(vec2 px, float mn, float t) {
       w = smoothstep(0.70, -0.70, dot(normalize(dirv + vec2(1e-4)), Lxy));
     }
   }
-  return 1.0 + clamp(v * w, -0.20, 0.02);
+  // −0.20→−0.12：弯月面加宽后散度峰约减半，钳制只防极值、不削出平台（平台=贴纸感）
+  return 1.0 + clamp(v * w, -0.12, 0.02);
 }
 
 // ---- P1 镶嵌涟漪环：液滴向外的行波环，弱-强-弱包络，缓慢外扩循环 ----
