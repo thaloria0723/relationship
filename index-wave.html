@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>水滴关系网 · 波场版</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        /* CDN 或 WebGL 失败时的兜底：同色板的静态渐变 */
+        background: linear-gradient(
+          180deg,
+          #e9f2f8 0%,
+          #cce0ec 55%,
+          #aecfe1 100%
+        );
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      /* ============================================================
+       * 水滴关系网 · 背景层（晨光水面）—— 波场版（迭代折射焦散）
+       * 浅蓝白渐变池底 + 一层水 + 很淡的动态白色涟漪
+       * 参考：resourses/波光3.jpg（比它更淡、更疏松）
+       *
+       * 与 index.html（voronoi 扭曲版）的唯一区别：涟漪的生成方式。
+       * 本版原理：采样点在三角波场中迭代折叠（模拟折射路径），
+       * 累积"光会聚度"→ 高会聚处即焦散细丝。丝网是折射的物理产物，
+       * 无胞/无多边形。（思路为图形学经典技法，常量与结构为本项目自定）
+       * ⚠ 沿袭项目教训：所有 pow 的底数保证 ≥ 0（abs/clamp 先行）。
+       *
+       * 渲染库：PixiJS 8.20.1（CDN，与设计规格技术栈一致）
+       * ============================================================ */
+
+      // ---- 手感参数（全部集中在此，调效果改这里）----
+      const CONFIG = {
+        // 池底色板（验收调整：整体加深一档，向参考图 #B0D4E0 靠）
+        poolTop: [0.914, 0.949, 0.973], // #E9F2F8 晨雾蓝
+        poolMid: [0.8, 0.878, 0.925], // #CCE0EC
+        poolDeep: [0.682, 0.812, 0.882], // #AECFE1 浅青蓝
+        waterShade: [0.58, 0.722, 0.808], // #94B8CE 水影（偏青）
+
+        webScale: 3.4, // 主网密度（npx → 模式空间；胞径≈1/webScale 短边）
+        webScale2: 1.9, // 次层密度（更疏、更淡，加深度）
+        webSpeed: 0.5, // 涟漪演化速度（静水池=慢）
+        webAmp: 0.2, // 主网强度（输出已钳 0..1，AMP 直接决定线亮；验收调整：整体光影减弱）
+        webAmp2: 0.08, // 次层强度
+        warpAmp: 0.3, // 域扭曲幅度（打破平铺直边，让胞壁呈水波曲线）
+        webClamp: 0.22, // 单层加光上限（防过曝死白）
+        patchAmp: 0.34, // 涟漪明暗斑驳（0=均匀，部分水面安静无线）
+        drift: [0.006, -0.004], // 光网整体漂移（归一坐标/s）
+        swellAmp: 0.018, // 大尺度缓涌的亮度呼吸
+        sunAmp: 0.08, // 晨光提亮
+        vigAmp: 0.055, // 四角暗角
+
+        // —— 液滴层（同色系凝胶滴，浮于水面）——
+        dropCount: 1, // ★试验：单颗水滴验证统一高度场方案（通过后改回 8）
+        dropSizeMin: 0.055, // 最小半径 / 短边
+        dropSizeMax: 0.115, // 最大半径 / 短边
+        dropShadowAmp: 0.18, // （旧贴图式投影，已弃用，保留参数位）
+        dropBob: 1.0, // 起伏晃动幅度倍率
+        lightX: -0.35, // 光源方向 xy（左上入光）；后期时段光影改这里
+        lightY: 0.55,
+
+        // —— 统一高度场（液滴=水面形变，光影由形变推导）——
+        domeH: 0.55, // dome 峰高 / 半径（真实坐滴接触角高，透镜要陡才有水感）
+        meniscusH: 0.035, // （弯月面已从高度场删去，保留参数位；接触暗部由 P4 投影表达）
+        refractStrength: 0.035, // 水底波纹被形变场偏折的强度（短边比例/单位斜率）
+        focusGain: 0.75, // 光会聚度增益（散度→明暗；验收调整：液滴周光影减弱）
+        lensDepth: 3.2, // 液滴透镜的等效水深 / 半径（深→内部纹理位移大、有倒立像感）
+
+        // —— P1 镶嵌涟漪环（液滴向外的行波环，响应液滴的存在）——
+        // 验收修正：太强/太快/起始太靠外/范围太远 → 慢速 + 弱-强-弱包络 + 从滴内发出 + 贴滴覆盖
+        ringSpeed: 0.03, // 环外扩速度（相位/s；一圈约 33s，静水池极慢）
+        ringInner: 0.6, // 环出生半径 / r（滴内发出，滴内段被液滴本体遮住，接触线处冒头）
+        ringOuter: 2.0, // 环消亡半径 / r（只回应液滴近旁，不侵入远处水面）
+        ringBright: 0.03, // 亮带强度（第一眼几乎察觉不到，盯看才隐约可见）
+        ringDark: 0.016, // 暗前缘强度
+
+        // —— P2 向光亮斑池（液滴透镜把光聚焦到受光侧贴边的水面上）——
+        poolAmp: 0.07, // 亮斑基准强度
+        poolEnvGain: 0.1, // ×env 增益（焦散亮处更足；峰值合计 ≈ +0.17，明显但不死白）
+        poolDist: 1.16, // 亮斑中心距滴心 / r（受光侧贴边，紧挨接触线外）
+        poolSigma: 28.0, // 径向紧凑度（σ≈0.13r 的贴边弧带，非远处圆斑）
+        poolSpread: 5.0, // 角向聚束（正对光方向最亮，主体 ±~40°，成弯月形）
+
+        reducedTime: 47.0, // prefers-reduced-motion 时冻结在的这一帧
+      };
+
+      const CDN =
+        "https://cdn.jsdelivr.net/npm/pixi.js@8.20.1/dist/pixi.min.mjs";
+
+      // ---- 液滴布点（模块级生成，烘焙进 shader 常量；可复现伪随机）----
+      // 位置=宽/高比例（resize 安全），半径=短边比例，w=相位；避让距离按名义宽高比 1.6 估算
+      const DROPS = (() => {
+        let seed = 20260904;
+        const rand = () => (seed = (seed * 48271) % 2147483647) / 2147483647;
+        const list = [];
+        for (let i = 0; i < CONFIG.dropCount; i++) {
+          const r =
+            CONFIG.dropSizeMin +
+            rand() * (CONFIG.dropSizeMax - CONFIG.dropSizeMin);
+          let u = 0.5,
+            v = 0.5;
+          for (let tries = 0; tries < 40; tries++) {
+            u = 0.09 + rand() * 0.82;
+            v = 0.11 + rand() * 0.78;
+            if (
+              list.every(
+                (d) =>
+                  Math.hypot((u - d[0]) * 1.6, v - d[1]) > (r + d[2]) * 2.1,
+              )
+            )
+              break;
+          }
+          if (CONFIG.dropCount === 1) {
+            u = 0.36;
+            v = 0.3;
+          } // 试验：放在下半蓝区，焦散纹理丰富，透镜效果可读
+          list.push([u, v, r, rand()]);
+        }
+        return list;
+      })();
+      // 烘焙为 const vec4 D0..Dn（数字全部 toFixed，防 int 字面量坑）
+      const DROP_CONSTS = DROPS.map(
+        (d, i) =>
+          `const vec4 D${i} = vec4(${d.map((v) => v.toFixed(4)).join(", ")});`,
+      ).join("\n");
+      // 选择器按实际数量生成（试验单颗时只引用 D0）
+      const DROP_SELECTOR = DROPS.map(
+        (_, i) => `  if (i == ${i}) return D${i};`,
+      ).join("\n");
+
+      // 注：不写 #version/precision，统一由 PixiJS 注入（与官方示例一致）
+      const VERT = /* glsl */ `
+in vec2 aPosition;
+void main() {
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}`;
+
+      const FRAG = /* glsl */ `
+uniform vec2  uResolution;  // drawing buffer 像素
+uniform float uTime;
+
+// 液滴布点烘焙为常量（Pixi v8 uniform 不支持数组类型，故不走 uniform）
+${DROP_CONSTS}
+#define DROP_COUNT ${CONFIG.dropCount}
+
+vec4 dropAt(int i) {
+${DROP_SELECTOR}
+  return vec4(0.0);
+}
+
+const vec3 POOL_TOP  = vec3(${CONFIG.poolTop.map((v) => v.toFixed(4)).join(", ")});
+const vec3 POOL_MID  = vec3(${CONFIG.poolMid.map((v) => v.toFixed(4)).join(", ")});
+const vec3 POOL_DEEP = vec3(${CONFIG.poolDeep.map((v) => v.toFixed(4)).join(", ")});
+const vec3 WATER_SHADE = vec3(${CONFIG.waterShade.map((v) => v.toFixed(4)).join(", ")});
+
+// ⚠ 全部 toFixed(4)：JS 的 3.0 会序列化成 "3"，GLSL 里整数字面量赋给 float 直接编译错误
+const float WEB_SCALE  = ${CONFIG.webScale.toFixed(4)};
+const float WEB_SCALE2 = ${CONFIG.webScale2.toFixed(4)};
+const float WEB_SPEED  = ${CONFIG.webSpeed.toFixed(4)};
+const float WEB_AMP    = ${CONFIG.webAmp.toFixed(4)};
+const float WEB_AMP2   = ${CONFIG.webAmp2.toFixed(4)};
+const float WEB_CLAMP  = ${CONFIG.webClamp.toFixed(4)};
+const float WARP_AMP   = ${CONFIG.warpAmp.toFixed(4)};
+const float PATCH_AMP  = ${CONFIG.patchAmp.toFixed(4)};
+const vec2  DRIFT      = vec2(${CONFIG.drift.map((v) => v.toFixed(4)).join(", ")});
+const float SWELL_AMP  = ${CONFIG.swellAmp.toFixed(4)};
+const float SUN_AMP    = ${CONFIG.sunAmp.toFixed(4)};
+const float VIG_AMP    = ${CONFIG.vigAmp.toFixed(4)};
+const float SHADOW_AMP = ${CONFIG.dropShadowAmp.toFixed(4)};
+const float BOB_AMP    = ${CONFIG.dropBob.toFixed(4)};
+const vec2  LIGHT_XY   = vec2(${CONFIG.lightX.toFixed(4)}, ${CONFIG.lightY.toFixed(4)});
+const float DOME_H     = ${CONFIG.domeH.toFixed(4)};
+const float MENI_H     = ${CONFIG.meniscusH.toFixed(4)};
+const float REFR_STR   = ${CONFIG.refractStrength.toFixed(4)};
+const float FOCUS_GAIN = ${CONFIG.focusGain.toFixed(4)};
+const float LENS_DEPTH = ${CONFIG.lensDepth.toFixed(4)};
+const float RING_SPEED  = ${CONFIG.ringSpeed.toFixed(4)};
+const float RING_INNER  = ${CONFIG.ringInner.toFixed(4)};
+const float RING_OUTER  = ${CONFIG.ringOuter.toFixed(4)};
+const float RING_BRIGHT = ${CONFIG.ringBright.toFixed(4)};
+const float RING_DARK   = ${CONFIG.ringDark.toFixed(4)};
+const float POOL_AMP     = ${CONFIG.poolAmp.toFixed(4)};
+const float POOL_ENV     = ${CONFIG.poolEnvGain.toFixed(4)};
+const float POOL_DIST    = ${CONFIG.poolDist.toFixed(4)};
+const float POOL_SIGMA   = ${CONFIG.poolSigma.toFixed(4)};
+const float POOL_SPREAD  = ${CONFIG.poolSpread.toFixed(4)};
+
+// 迭代折射焦散（shadertoy 经典技法的量纲修正版）：
+// 点在三角波场中反复折叠，累积光会聚度 → 细丝。
+// mod+(-250) 大偏移是本技法数值区间的必要部分，不可省。
+// 返回 0..1（1=焦散亮线），由外部 ×AMP 控制浓度
+float causticWeb(vec2 uv, float t) {
+  const float TAU = 6.28318530718;
+  vec2 p = mod(uv * TAU, TAU) - 250.0;
+  vec2 i = p;
+  float c = 1.0;
+  const float INTEN = 0.005;
+  for (int n = 0; n < 5; n++) {
+    float tt = t * (1.0 - (3.5 / (float(n) + 1.0)));
+    i = p + vec2(cos(tt - i.x) + sin(tt + i.y),
+                 sin(tt - i.y) + cos(tt + i.x));
+    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / INTEN),
+                           p.y / (cos(i.y + tt) / INTEN)));
+  }
+  c /= 5.0;                                   // c ≥ 0.2，恒为正
+  float shaped = 1.17 - pow(c, 1.4);          // pow 底数恒正 ✔
+  return clamp(pow(abs(shaped), 11.0), 0.0, 1.0); // 更锐的细丝（折射需要细节可折）
+}
+
+// ---- 去平铺三件套 ----
+// 1) 域扭曲：慢变大尺度摆动，把瓷砖直边揉成水波曲线
+vec2 warpP(vec2 p, float t) {
+  return p + WARP_AMP * vec2(
+    sin(p.y * 1.7 + t * 0.40 + 2.0) + 0.60 * sin(p.y * 3.9 - t * 0.23),
+    cos(p.x * 1.5 - t * 0.35 + 4.0) + 0.60 * cos(p.x * 3.3 + t * 0.19));
+}
+const mat2 ROT = mat2(0.866, 0.5, -0.5, 0.866);   // 30°：次副本换个方向
+// 2) 双采样融合：同层两个大偏移副本用慢变遮罩融合，接缝互相遮盖 → 周期性不可见
+// 3) seed 让主/次层相位、偏移、遮罩各自独立
+float aperiodicWeb(vec2 p, float t, float seed) {
+  vec2 q = warpP(p, t);
+  float w1 = causticWeb(q, t + seed);
+  float w2 = causticWeb(ROT * (q + vec2(37.2, 11.7)), t + seed + 11.3);
+  float m = 0.5 + 0.5 * sin(p.x * 1.1 + p.y * 0.8 + seed)
+                 * sin(p.x * 0.6 - p.y * 0.9 - seed * 1.7);
+  return mix(w1, w2, m);
+}
+
+// —— 水底场景：池底渐变 + 晨光 + 缓涌 + 焦散光网 + 水影 ——
+// （液滴的折射采样复用此函数：透过液滴看到的是被放大扭曲的同一片水底）
+vec3 sceneColor(vec2 px) {
+  float mn = min(uResolution.x, uResolution.y);
+  vec2 npx = px / mn;                       // 短边=1 的归一坐标（原点左下）
+  float gy = 1.0 - px.y / uResolution.y;    // 0=屏顶 1=屏底
+  float aspect = uResolution.x / uResolution.y;
+
+  // 池底：浅蓝白垂直渐变（顶部近白 → 底部浅青蓝）
+  vec3 col = mix(POOL_TOP, POOL_MID, smoothstep(0.0, 0.55, gy));
+  col = mix(col, POOL_DEEP, smoothstep(0.5, 1.0, gy));
+
+  // 晨光：自顶部略偏左入水的大范围柔光
+  vec2 toLight = npx - vec2(0.38 * aspect, (uResolution.y / mn) * 1.10);
+  float sun = exp(-3.0 * length(toLight * vec2(1.0, 0.8)));
+  col += vec3(1.0) * sun * SUN_AMP;
+
+  // 大尺度缓涌：整片亮度极慢呼吸
+  float swell = 0.5 + 0.5 * sin(npx.x * 1.8 + npx.y * 1.2 - uTime * 0.10);
+  col *= 1.0 + SWELL_AMP * (swell - 0.5);
+
+  // 迭代折射焦散：主网 + 次层（均经去平铺处理，反向慢漂）
+  vec2 wp = npx + DRIFT * uTime;
+  float web  = aperiodicWeb(wp * WEB_SCALE,        uTime * WEB_SPEED,          0.0);
+  float web2 = aperiodicWeb(wp * WEB_SCALE2 + 13.0, -uTime * WEB_SPEED * 0.7 + 7.0, 5.0);
+
+  // 斑驳：局部水面安静、涟漪隐没（更疏、更自然）
+  float patch = 1.0 - PATCH_AMP * (0.5 + 0.5 * sin(npx.x * 2.6 + npx.y * 3.4 + uTime * 0.10)
+                                                    * sin(npx.x * 1.2 - npx.y * 2.2 - uTime * 0.07));
+
+  col += vec3(1.0) * min(web  * WEB_AMP,  WEB_CLAMP) * patch;
+  col += vec3(1.0) * min(web2 * WEB_AMP2, WEB_CLAMP * 0.6) * patch;
+  col = mix(col, WATER_SHADE, clamp(0.05 * patch, 0.0, 1.0) * 0.5); // 极轻水影，防纯白打架
+  return col;
+}
+
+// 液滴实时中心：静态锚点 + 随缓涌起伏 + 自身相位晃动（在水波上起伏的感觉）
+vec2 dropCenterPx(vec4 d, float t) {
+  float mn = min(uResolution.x, uResolution.y);
+  vec2 c = vec2(d.x * uResolution.x, d.y * uResolution.y);
+  float npx_x = c.x / mn, npx_y = c.y / mn;
+  float swell = 0.5 + 0.5 * sin(npx_x * 1.8 + npx_y * 1.2 - t * 0.10);
+  float bob  = ((swell - 0.5) * 0.55 + 0.30 * sin(t * 0.90 + d.w * 6.2831)) * d.z * mn * BOB_AMP;
+  float sway = ( 0.30 * sin(t * 0.63 + d.w * 10.72)) * d.z * mn * BOB_AMP;
+  return c + vec2(sway, bob);
+}
+
+// ---- 统一高度场（液滴=水面的一部分）----
+// dome 隆起的解析梯度（px 单位：高度px/水平px），随起伏动画同步
+// （弯月面梯度已删：它的散度尖峰产生径向对称"接触新月影"，太假；
+//   贴边暗部由 P4 投影接管，弯月面聚光形态由独立的接触亮线分支表达）
+vec2 dropFieldGrad(vec2 px, float mn, float t) {
+  vec2 g = vec2(0.0);
+  for (int i = 0; i < DROP_COUNT; i++) {
+    vec4 d = dropAt(i);
+    if (d.z < 0.001) continue;
+    float r = d.z * mn;
+    vec2 rel = (px - dropCenterPx(d, t)) / r;
+    float dist = length(rel);
+    if (dist > 2.2) continue;
+    if (dist < 1.0) {
+      // dome：h = DOME_H·r·(1-d²)²，接触线斜率为零（与水面连续）
+      g += rel * (-4.0 * DOME_H * (1.0 - dist * dist)) / r;
+    }
+  }
+  return g;
+}
+
+// 光会聚度：表面形变偏转光路，偏移场的散度→明暗（压缩=亮，发散=暗）
+// 这就是"影子"的物理本体：不是贴图，是水面形变对光的重新分配
+// 影子的方向性：背光侧暗部加强，向光侧几乎消失（与光源方向一致）
+float lightField(vec2 px, float mn, float t) {
+  float e = 3.0;
+  float k = mn * REFR_STR;
+  vec2 o0 = dropFieldGrad(px, mn, t) * k;
+  vec2 ox = dropFieldGrad(px + vec2(e, 0.0), mn, t) * k;
+  vec2 oy = dropFieldGrad(px + vec2(0.0, e), mn, t) * k;
+  float div = (ox.x - o0.x + oy.y - o0.y) / e;
+  float v = -div * FOCUS_GAIN;
+  // 接触影 = 背光新月：只保留背光扇区（向光侧完全消失，不再有环形描边）
+  vec2 Lxy = normalize(LIGHT_XY + vec2(1e-5, 0.0));
+  float w = 1.0, best = 1e9;
+  for (int i = 0; i < DROP_COUNT; i++) {
+    vec4 d = dropAt(i);
+    if (d.z < 0.001) continue;
+    float r = d.z * mn;
+    vec2 dirv = px - dropCenterPx(d, t);
+    float band = abs(length(dirv) / r - 1.03);
+    if (band < best) {
+      best = band;
+      w = smoothstep(0.70, -0.70, dot(normalize(dirv + vec2(1e-4)), Lxy));
+    }
+  }
+  return 1.0 + clamp(v * w, -0.20, 0.02);
+}
+
+// ---- P1 镶嵌涟漪环：液滴向外的行波环，弱-强-弱包络，缓慢外扩循环 ----
+// 环从滴内出生（该段被液滴本体遮住）→ 接触线处冒头（弱）→ 滴近旁峰值（强）→ 远端淡出（弱）
+// 强度压到"第一眼发现不了"：细看才见液滴近旁有极隐约的水面回应
+float rippleRings(vec2 px, float mn, float t) {
+  float acc = 0.0;
+  for (int i = 0; i < DROP_COUNT; i++) {
+    vec4 d = dropAt(i);
+    if (d.z < 0.001) continue;
+    float r = d.z * mn;
+    float dist = length(px - dropCenterPx(d, t)) / r;
+    if (dist > RING_OUTER + 0.4) continue;
+    for (int k = 0; k < 3; k++) {
+      float fk = float(k);
+      float phase = fract(t * RING_SPEED + fk * 0.33 + d.w);  // 0..1 循环外扩
+      float rr = RING_INNER + phase * (RING_OUTER - RING_INNER); // 环半径 0.6r → 2.0r
+      float birth = smoothstep(0.10, 0.45, phase);             // 出生淡入（接触线附近还弱）
+      float decay = 1.0 - smoothstep(0.55, 1.0, phase);        // 远端淡出
+      float fade = birth * decay / (0.55 + dist * 0.60);       // 弱-强-弱 × 距离衰减
+      float x = dist - rr;
+      float bright = exp(-x * x * 55.0);                       // 亮带（细环）
+      float dx = (x - 0.15) * 55.0;
+      float dark  = exp(-dx * dx);                             // 外侧暗前缘（乘法替代 pow，防负底数 NaN）
+      acc += (bright * RING_BRIGHT - dark * RING_DARK) * fade;
+    }
+  }
+  return acc;
+}
+
+// ---- P2 向光亮斑池：液滴透镜把光聚焦到受光侧贴边的水面上 ----
+// 一弯贴边的弧形亮斑：径向紧凑（d≈POOL_DIST±0.13r）× 角向集中在正对光方向（±~40°）
+// ×env（局部环境亮度）：落在焦散亮处更足——液滴参与光的分配，与场景光学互动
+float lightPool(vec2 px, float mn, float t) {
+  float acc = 0.0;
+  vec2 Lxy = normalize(LIGHT_XY + vec2(1e-5, 0.0));
+  for (int i = 0; i < DROP_COUNT; i++) {
+    vec4 d = dropAt(i);
+    if (d.z < 0.001) continue;
+    float r = d.z * mn;
+    vec2 dirv = px - dropCenterPx(d, t);
+    float dist = length(dirv) / r;
+    float ring = dist - POOL_DIST;                 // 贴边带（径向）
+    float radial = exp(-ring * ring * POOL_SIGMA); // 紧凑弧带 σ≈0.13r
+    vec2 dirn = normalize(dirv + vec2(1e-4));
+    float ang = dot(dirn, Lxy);                    // 1 = 正对光源方向
+    float angular = exp(-(1.0 - ang) * (1.0 - ang) * POOL_SPREAD); // 角向聚束 ±~40°
+    acc += radial * angular;
+  }
+  return acc;
+}
+
+// 分层模型：水底（sceneColor：光影下的波纹）× 光会聚度（形变的明暗后果）→ 水面（液滴；波纹/液柱后续）
+void main() {
+  vec2 px = gl_FragCoord.xy;
+  float mn = min(uResolution.x, uResolution.y);
+  vec3 LDIR = normalize(vec3(LIGHT_XY, 0.75));
+
+  // 水底 × 光会聚度：液滴形变让波纹在其周围弯折，暗环与亮斑由散度自动生成
+  vec3 col = sceneColor(px) * lightField(px, mn, uTime);
+
+  // 涟漪环：水面对外圈液滴的持续回应（镶嵌感的第一证据）
+  col += vec3(1.0, 1.0, 0.985) * rippleRings(px, mn, uTime);
+
+  // P2 向光亮斑池：弯月面聚光落在水面上的柔亮区（×env：焦散亮处更足）
+  float envp = clamp((dot(col, vec3(0.299, 0.587, 0.114)) - 0.62) * 1.6, 0.0, 1.0);
+  col += vec3(0.96, 0.995, 1.0) * lightPool(px, mn, uTime) * (POOL_AMP + POOL_ENV * envp);
+
+  // ---- 液滴本体（连续高度场的 dome 部分，Snell 折射）----
+  for (int i = 0; i < DROP_COUNT; i++) {
+    vec4 d = dropAt(i);
+    if (d.z < 0.001) continue;
+    float r = d.z * mn;
+    vec2 c = dropCenterPx(d, uTime);
+    float squash = 0.035 * sin(uTime * 0.8 + d.w * 8.2);      // 轻微变形（挤压呼吸）
+    vec2 rel = vec2((px.x - c.x) / (r * (1.0 + squash)),
+                    (px.y - c.y) / (r * (1.0 - squash)));
+    float dr = length(rel);
+
+    if (dr < 1.0) {
+      float d2 = dr * dr;
+      // dome 法线：由高度场解析梯度直接给出（斜率与形变场完全一致）
+      vec3 N = normalize(vec3(4.0 * DOME_H * (1.0 - d2) * rel, 1.0));
+
+      // Snell 折射：η=1/1.33；边缘偏移急剧增大（压缩），中心近零（微放大）
+      vec3 R = refract(vec3(0.0, 0.0, -1.0), N, 0.752);
+      if (dot(R, R) < 1e-4) R = normalize(vec3(N.xy, 0.4));   // 掠射角 TIR 兜底
+      vec2 refr = c + R.xy / abs(R.z) * r * LENS_DEPTH;
+
+      vec3 dcol = sceneColor(refr) * lightField(refr, mn, uTime);
+      // 透镜对比增强：折射进来的纹理要比周围更"扎眼"（真实水滴的内部高对比）
+      dcol = (dcol - 0.5) * 1.28 + 0.42;
+      dcol = mix(dcol, dcol * vec3(0.94, 0.995, 1.05), 0.22); // 水色微调（轻：保持通透）
+      dcol *= 0.94;                                           // 本体比环境暗一档：亮底上的透镜分离度
+      float thick = pow(dr, 2.6);                             // 边缘水层略厚 → 轻微变暗
+      dcol *= mix(1.0, 0.86, thick);
+      dcol *= vec3(0.975, 1.0, 1.03);                         // 极轻水体吸收
+
+      // 按位置受光：折射采到的亮度调制高光/窗光（落在亮斑上的液滴更闪）
+      float lum = dot(dcol, vec3(0.299, 0.587, 0.114));
+      float env = 0.72 + 0.55 * smoothstep(0.55, 1.0, lum);
+      float win = exp(-dot(rel - vec2(-0.40, 0.38), rel - vec2(-0.40, 0.38)) * 7.5);
+      dcol += vec3(1.0) * win * 0.26 * env;                   // 紧凑窗光（贴边小亮块）
+      float sp = pow(max(dot(N, LDIR), 0.0), 120.0);
+      dcol += vec3(1.0) * sp * 0.45 * env;                    // 锐高光
+      vec2 Lxy = normalize(LDIR.xy + vec2(1e-5, 0.0));
+      // P3 边缘折射月牙对：透镜搬光——受光侧底部边缘光线发散缺光（暗月牙），
+      // 会聚光在背光侧底部集中穿出（亮月牙）；贴底弧带×方向权重自然成月牙形
+      vec2 Nn = normalize(N.xy + vec2(1e-5, 0.0));
+      float face = dot(Nn, Lxy);
+      float crescent = smoothstep(0.80, 0.995, dr);  // 贴底边缘弧带（加宽：0.80 起坡，月牙更饱满）
+      dcol = mix(dcol, dcol * vec3(0.45, 0.58, 0.70), crescent * clamp(face, 0.0, 1.0) * 0.55); // 受光侧：暗月牙（蓝灰调）
+      dcol += vec3(0.93, 0.99, 1.0) * crescent * clamp(-face, 0.0, 1.0) * (0.14 + 0.12 * env);  // 背光侧：亮月牙（×env）
+      float cg = exp(-dot(rel - vec2(0.30, -0.34), rel - vec2(0.30, -0.34)) * 7.0);
+      dcol += vec3(0.96, 1.0, 1.0) * cg * 0.18;               // 内部焦散聚光
+
+      float a = smoothstep(1.0, 0.94, dr);
+      col = mix(col, dcol, a);
+    } else if (dr < 1.08 && dr > 0.955) {
+      // 向光侧接触亮线：弯月面聚成的细亮线（环境色调，非纯白；背光侧无）
+      vec2 Lxy2 = normalize(LDIR.xy + vec2(1e-5, 0.0));
+      vec2 dirn = normalize(rel + vec2(1e-5, 0.0));
+      float lit = smoothstep(-0.25, 0.60, dot(dirn, Lxy2));
+      float line = smoothstep(1.08, 1.0, dr) * smoothstep(0.955, 1.0, dr);
+      float envl = clamp((dot(col, vec3(0.299, 0.587, 0.114)) - 0.55) * 2.2, 0.0, 1.0);
+      col += vec3(0.10, 0.14, 0.11) * line * lit * (0.30 + 0.70 * envl);
+    }
+    // P4 背光投影（参考水滴镶嵌.jpg）：一整团贴滴柔影。独立分支、从接触线连续起坡——
+    // 旧版从 1.08 才开始，贴边处形成 ~13% 亮度台阶（硬边根源）；高斯核羽化+晕收紧保单峰过渡
+    if (dr >= 1.0 && dr < 2.7) {
+      // 物理对应：光源有面积 → 半影；液滴有高度 → 光锥发散；乘法形式=挡光量与局部亮度成正比
+      vec2 Lxy3 = normalize(LDIR.xy + vec2(1e-5, 0.0));
+      vec2 so = px - (c - Lxy3 * r * 0.30);
+      float along = dot(so, -Lxy3) / r;                     // 沿光锥（背光为正）
+      float across = dot(so, vec2(-Lxy3.y, Lxy3.x)) / r;    // 垂直光锥
+      float sideW = 1.0 - smoothstep(-1.05, 0.40, dot(normalize(so + vec2(1e-5)), Lxy3));
+      float spread = 1.0 + max(along, 0.0) * 0.5;           // 光锥发散：影宽随距离增大
+      float dsC = length(vec2(along * 0.85, across * 1.20)) / spread;   // 本影核（沿光略拉长）
+      float dsP = length(vec2(along * 0.68, across)) / (spread * 1.35); // 弥散晕（收紧：略宽于核即融合）
+      float sh = (exp(-dsC * dsC * 0.9) + exp(-dsP * dsP * 2.0) * 0.40) * sideW
+               / (0.95 + 0.35 * max(along, 0.0))            // 能量弥散：密度随距离降
+               * (1.0 - smoothstep(1.4, 2.3, along));       // 尾部早收（范围减小）
+      col *= 1.0 - sh * 0.17;
+    }
+  }
+
+  // ---- 暗角：四角极轻下沉，让画面坐稳 ----
+  vec2 q = px / uResolution - 0.5;
+  float vig = smoothstep(0.35, 0.72, length(q * vec2(1.15, 1.0)));
+  col *= 1.0 - VIG_AMP * vig;
+
+  gl_FragColor = vec4(col, 1.0);
+}`;
+
+      (async () => {
+        const reduceMotion = matchMedia(
+          "(prefers-reduced-motion: reduce)",
+        ).matches;
+
+        let PIXI;
+        try {
+          PIXI = await import(CDN);
+        } catch (e) {
+          // 加载失败：保留 body 上的 CSS 渐变兜底
+          console.warn("PixiJS CDN 加载失败，回退为静态渐变", e);
+          return;
+        }
+
+        const app = new PIXI.Application();
+        await app.init({
+          resizeTo: window,
+          preference: "webgl",
+          background: 0xe9f2f8,
+          antialias: false,
+          powerPreference: "high-performance",
+        });
+        document.body.appendChild(app.canvas);
+
+        // 全屏大三角形（NDC 直出，覆盖屏幕，无需随 resize 重建）
+        const geometry = new PIXI.Geometry({
+          attributes: { aPosition: [-1, -1, 3, -1, -1, 3] },
+        });
+
+        const shader = PIXI.Shader.from({
+          gl: { vertex: VERT, fragment: FRAG },
+          resources: {
+            uScene: {
+              uResolution: {
+                value: [app.canvas.width, app.canvas.height],
+                type: "vec2<f32>",
+              },
+              uTime: {
+                value: reduceMotion ? CONFIG.reducedTime : 0,
+                type: "f32",
+              },
+            },
+          },
+        });
+
+        app.stage.addChild(new PIXI.Mesh({ geometry, shader }));
+
+        const u = shader.resources.uScene.uniforms;
+        let lastW = 0,
+          lastH = 0;
+
+        app.ticker.add(() => {
+          const w = app.canvas.width,
+            h = app.canvas.height;
+          if (w !== lastW || h !== lastH) {
+            // 含 DPR 的 drawing buffer 尺寸
+            lastW = w;
+            lastH = h;
+            u.uResolution[0] = w;
+            u.uResolution[1] = h;
+          }
+          if (!reduceMotion) u.uTime += app.ticker.deltaMS / 1000;
+        });
+      })();
+    </script>
+  </body>
+</html>
