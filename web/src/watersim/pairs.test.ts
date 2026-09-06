@@ -102,8 +102,12 @@ describe("watersim/pairs 毛细吸引(§4.3,风格化)", () => {
 });
 
 describe("watersim/pairs 聚合(§8:V 前后相等、动量守恒、液滴数 −1)", () => {
-  it("间隙<bridgeRange 持续 drainTime → 聚合:r 合并、动量守恒、场脉冲", () => {
-    const params: WaterSimParams = { ...defaultParams, capillaryA: 0 };
+  it("间隙<bridgeRange 持续 drainTime → 聚合:r 合并、动量守恒、场脉冲(mergeEnabled 显式开)", () => {
+    const params: WaterSimParams = {
+      ...defaultParams,
+      capillaryA: 0,
+      mergeEnabled: true, // 聚合机制验收场景(默认 false=液桥不融合,§12.2-C′)
+    };
     const drops = makeFloaters(params, [
       { x: 0.5 - 0.021, y: 0.5, r: 0.02 }, // 中心距 0.042,间隙 = 0.042 − 0.04 = 0.002 < bridgeRange·0.04
       { x: 0.5 + 0.021, y: 0.5, r: 0.02 },
@@ -125,8 +129,12 @@ describe("watersim/pairs 聚合(§8:V 前后相等、动量守恒、液滴数 �
     expect(Math.abs(d.epsVel[0]!)).toBeGreaterThan(0);
   });
 
-  it("排液未满 drainTime 不聚合;离开桥接区间计时清零", () => {
-    const params: WaterSimParams = { ...defaultParams, capillaryA: 0 };
+  it("排液未满 drainTime 不聚合;离开桥接区间计时清零(mergeEnabled 显式开)", () => {
+    const params: WaterSimParams = {
+      ...defaultParams,
+      capillaryA: 0,
+      mergeEnabled: true,
+    };
     const drops = makeFloaters(params, [
       { x: 0.5 - 0.021, y: 0.5, r: 0.02 },
       { x: 0.5 + 0.021, y: 0.5, r: 0.02 },
@@ -141,6 +149,19 @@ describe("watersim/pairs 聚合(§8:V 前后相等、动量守恒、液滴数 �
     drops.state.x[1] = 0.7;
     pairs.step(params.dt);
     expect(drops.state.bridgeT[0]!).toBe(0);
+  });
+
+  it("mergeEnabled=false(默认):桥接对靠拢但不融合(液桥网络,§12.2-C′)", () => {
+    const params: WaterSimParams = { ...defaultParams, capillaryA: 0 };
+    const drops = makeFloaters(params, [
+      { x: 0.5 - 0.021, y: 0.5, r: 0.02 },
+      { x: 0.5 + 0.021, y: 0.5, r: 0.02 },
+    ]);
+    const pairs = new DropletPairs(params, drops);
+    for (let s = 0; s < 30; s++) pairs.step(params.dt);
+    expect(drops.state.count).toBe(2); // 液滴数不变
+    expect(pairs.mergeCount).toBe(0);
+    expect(drops.state.bridgeT[0]!).toBe(0); // 不计时(不进入聚合管线)
   });
 
   it("冷却期内的滴不参与聚合(cooldown 防瞬聚)", () => {

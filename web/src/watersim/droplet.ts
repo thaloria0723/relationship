@@ -60,6 +60,8 @@ export class DropletSystem {
       epsVel: new Float32Array(max),
       bridgeT: new Float32Array(max),
       cooldown: new Float32Array(max),
+      anchorX: new Float32Array(max),
+      anchorY: new Float32Array(max),
     };
   }
 
@@ -83,6 +85,8 @@ export class DropletSystem {
     d.epsVel[i] = 0;
     d.bridgeT[i] = 0;
     d.cooldown[i] = 0;
+    d.anchorX[i] = d.x[i];
+    d.anchorY[i] = d.y[i];
     d.count = i + 1;
     return true;
   }
@@ -109,6 +113,8 @@ export class DropletSystem {
       d.epsVel[i] = d.epsVel[last]!;
       d.bridgeT[i] = d.bridgeT[last]!;
       d.cooldown[i] = d.cooldown[last]!;
+      d.anchorX[i] = d.anchorX[last]!;
+      d.anchorY[i] = d.anchorY[last]!;
     }
     d.count = last;
   }
@@ -191,6 +197,28 @@ export class DropletSystem {
         p.couplingClamp,
       );
       d.d[i] = dNew;
+      // 2.5) 接触线钉扎恢复力(裁决 §12.2-C′,近似接触角滞后 pinning):
+      //      离出生锚点超过 pinRadius 后,受线性弹簧回拉(临界阻尼增稳);
+      //      pinRadius 内自由漂移(波浪推动不受限),锚点固定不漂移。
+      const ax0 = d.anchorX[i]!;
+      const ay0 = d.anchorY[i]!;
+      const pinDx = x - ax0;
+      const pinDy = y - ay0;
+      const pinDist = Math.hypot(pinDx, pinDy);
+      if (p.pinStrength > 0 && pinDist > p.pinRadius) {
+        const over = pinDist - p.pinRadius;
+        const nx = pinDx / pinDist;
+        const ny = pinDy / pinDist;
+        // 临界阻尼:c_pin = 2·√(k_pin/m),回拉加速度 = −(k/m)·over − (c/m)·v_n
+        const m = p.densityRatio * p.waterRho * ((4 / 3) * Math.PI * r * r * r);
+        const kOverM = p.pinStrength / m;
+        const cOverM = 2 * Math.sqrt(kOverM);
+        const vn = d.vx[i]! * nx + d.vy[i]! * ny;
+        d.vx[i] =
+          d.vx[i]! - (kOverM * over + cOverM * Math.max(vn, 0)) * nx * dt;
+        d.vy[i] =
+          d.vy[i]! - (kOverM * over + cOverM * Math.max(vn, 0)) * ny * dt;
+      }
       // 3) 坡度力(§4.3):a = −slopeCoupling·g_flow·(V_sub/V_R)/ratio·∇h。
       //    g 取 g_flow = c²/H(与风格化波动力学自洽,推导同 field.ts 头注/裁决②);
       //    只采样动态 h,不含核——准静态部分不走反馈回路(§2.3 数值设计)。

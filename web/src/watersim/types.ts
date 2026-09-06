@@ -63,4 +63,10 @@ export interface DropletState {
   bridgeT: Float32Array;
   /** 聚合冷却剩余(秒;防合并后瞬聚,§5.4 mergeCooldown) */
   cooldown: Float32Array;
+  /**
+   * 出生锚点 x/y(裁决 §12.2-C′ 接触线钉扎:液滴在锚点附近相对固定,
+   * 近似接触角滞后 pinning;锚点 = 首次接触入水位置)
+   */
+  anchorX: Float32Array;
+  anchorY: Float32Array;
 }

@@ -47,7 +47,8 @@ export type WaterSimParams = {
   spongeWidth: number;
 
   // ---- §5.3 液滴单体(M2 接入) ----
-  /** 密度比 ρ_d/ρ_w(范围 0.3–0.95;≥1 即沉,钳制) */
+  /** 密度比 ρ_d/ρ_w(范围 0.3–0.95;≥1 即沉,钳制。裁决 §12.2-A′:0.60→0.38 增浮力——
+   *  阿基米德 V_sub=ratio·V_R 同步给出「露出更多」与「凹陷变浅」两个效果) */
   densityRatio: number;
   /** 液滴最小半径(m) */
   rMin: number;
@@ -85,6 +86,13 @@ export type WaterSimParams = {
   mergeCooldown: number;
   /** 液滴上限(超限拒收新滴,范围 8–64) */
   maxDroplets: number;
+  /** 聚合开关(裁决 §12.2-C′:默认 false=稳定化液滴网络,液桥连接互不融合;
+   *  演示/验收合并机制的场景显式置 true) */
+  mergeEnabled: boolean;
+  /** 接触线钉扎恢复劲度 k_pin(N/m,裁决 §12.2-C′;近似接触角滞后 pinning,0=关) */
+  pinStrength: number;
+  /** 钉扎松弛半径(m):离出生锚点该距离内自由漂移,超出受恢复力 */
+  pinRadius: number;
 
   // ---- §5.5 耦合(M2 接入) ----
   /** 凹陷核宽度(×r,3σ 截断、归一化 ∫=−V_sub,范围 0.8–2) */
@@ -132,7 +140,7 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   tracerCount: 400,
   spongeWidth: 8,
 
-  densityRatio: 0.6,
+  densityRatio: 0.38,
   rMin: 0.01,
   rMax: 0.028,
   gravity: 9.81,
@@ -145,12 +153,17 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   epsMax: 0.35,
 
   restitution: 0.3,
-  capillaryA: 4e-4,
-  capillaryRange: 2.5,
+  /** 裁决 §12.2-B′:4e-4→1.2e-4(吸引减弱,防链式合并) */
+  capillaryA: 1.2e-4,
+  /** 裁决 §12.2-B′:2.5→1.6(作用近距化) */
+  capillaryRange: 1.6,
   bridgeRange: 0.12,
   drainTime: 0.08,
   mergeCooldown: 0.25,
   maxDroplets: 32,
+  mergeEnabled: false,
+  pinStrength: 6e-3,
+  pinRadius: 0.06,
 
   /** 凹陷核宽度(×r,3σ 截断;默认 0.8 为验收整改裁决 B:深陡可见,范围下限,§10 预案) */
   kernelSigma: 0.8,
@@ -199,6 +212,8 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["drainTime", 0.03, 0.2],
   ["mergeCooldown", 0.1, 0.5],
   ["maxDroplets", 8, 64],
+  ["pinStrength", 0, 0.1],
+  ["pinRadius", 0.005, 0.5],
   ["kernelSigma", 0.8, 2],
   ["impulseGain", 0.3, 2],
   ["depthRateGain", 0.3, 2],
@@ -228,7 +243,9 @@ export function validateParams(p: WaterSimParams): void {
     }
   }
   if (p.boundaryMode !== "absorb" && p.boundaryMode !== "reflect") {
-    throw new RangeError(`参数 boundaryMode = "${String(p.boundaryMode)}" 只允许 absorb/reflect`);
+    throw new RangeError(
+      `参数 boundaryMode = "${String(p.boundaryMode)}" 只允许 absorb/reflect`,
+    );
   }
   if (p.rMin >= p.rMax) {
     throw new RangeError(`参数 rMin = ${p.rMin} 必须小于 rMax = ${p.rMax}`);

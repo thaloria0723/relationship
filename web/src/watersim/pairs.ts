@@ -72,9 +72,11 @@ export class DropletPairs {
 
         if (inBridge) {
           // ---- 桥接期(双方漂浮):禁碰撞弹开;冷却中的对不计时(防瞬聚,§10) ----
+          // mergeEnabled=false(裁决 §12.2-C′,默认):稳定化液滴网络——
+          // 液滴在桥接区互相靠拢但永不融合(液桥连接,互不合并);仅累计 bridgeT 供统计。
           this.bridging[i] = 1;
           this.bridging[j] = 1;
-          if (!cooling) {
+          if (p.mergeEnabled && !cooling) {
             d.bridgeT[i]! += dt;
             d.bridgeT[j]! += dt;
             if (d.bridgeT[i]! >= p.drainTime) {
