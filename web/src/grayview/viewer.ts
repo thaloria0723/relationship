@@ -45,6 +45,8 @@ export interface ViewerHooks {
   disablePokes?: boolean;
   tick?: (engine: WaterEngine, frameDt: number) => void;
   caption?: (simTime: number) => string | null;
+  /** 重播/重置时调用:宿主复位自己的时间线状态(引擎已由 viewer 重建) */
+  reset?: () => void;
 }
 
 export function mountGrayViewer(
@@ -281,6 +283,7 @@ export function mountGrayViewer(
   btnReset.addEventListener("click", () => {
     engine = new WaterEngine(params);
     scheduleReset();
+    hooks.reset?.(); // 宿主时间线状态同步复位(否则重播后演示不再触发)
     bakeTotal();
     updateSurface();
     updateWire();

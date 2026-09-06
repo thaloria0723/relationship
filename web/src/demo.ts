@@ -134,10 +134,20 @@ function captionDemo(t: number): string | null {
   return text;
 }
 
+/** 复位演示时间线状态(重播必须回到 §7 起点,否则事件队列已耗尽、演示不再触发) */
+function resetDemoState(): void {
+  nextEvent = 0;
+  waveSourceOn = false;
+  rainOn = false;
+  nextRainT = 13.0;
+  lastWaveT = 0;
+}
+
 const hooks: ViewerHooks = {
   disablePokes: true,
   tick: (e) => tickDemo(e),
   caption: (t) => captionDemo(t),
+  reset: resetDemoState,
 };
 
 // 页面直挂(demo.html 以本模块为入口)
