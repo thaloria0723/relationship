@@ -5,6 +5,7 @@
 // 插入 droplets.update 之后。确定性:固定 dt、类型化数组原地更新、固定顺序。
 // ============================================================
 
+import { BridgeSystem } from "./bridges";
 import { DropletSystem, IMPACT_SIGMA_RATIO, type DropletHost } from "./droplet";
 import { WaterField } from "./field";
 import { DropletPairs } from "./pairs";
@@ -43,6 +44,7 @@ export class WaterEngine implements DropletHost {
   readonly field: WaterField;
   readonly droplets: DropletSystem;
   readonly pairs: DropletPairs;
+  readonly bridges: BridgeSystem;
   readonly stats: EngineStats = {
     simTime: 0,
     stepCount: 0,
@@ -71,14 +73,20 @@ export class WaterEngine implements DropletHost {
     this.droplets = new DropletSystem(params, this.field, this);
     // 聚合涟漪:与入水弹坑同通道(分步展开,峰值受 clamp 约束)。
     // 脉冲体积 ∝ mergeRipple·rNew³(体积量纲,风格化幅度系数 §5.5)
-    this.pairs = new DropletPairs(params, this.droplets, (x, y, rNew) => {
-      this.scheduleImpact(
-        x,
-        y,
-        IMPACT_SIGMA_RATIO * rNew,
-        -this.params.mergeRipple * rNew * rNew * rNew,
-      );
-    });
+    this.pairs = new DropletPairs(
+      params,
+      this.droplets,
+      (x, y, rNew) => {
+        this.scheduleImpact(
+          x,
+          y,
+          IMPACT_SIGMA_RATIO * rNew,
+          -this.params.mergeRipple * rNew * rNew * rNew,
+        );
+      },
+      (removedIdx) => this.bridges.remapOnRemove(removedIdx),
+    );
+    this.bridges = new BridgeSystem(params, this.droplets);
   }
 
   /** 入水冲击 → 激活弹坑发射器(总量不变,分摊展开;clamp 语义不变) */
@@ -169,6 +177,8 @@ export class WaterEngine implements DropletHost {
     this.droplets.update(this.params.dt);
     // 2.2) 液滴间(M3):碰撞冲量+去穿透 → 毛细吸引 → 聚合判定与执行
     this.pairs.step(this.params.dt);
+    // 2.4) 液桥(任务①):成桥扫描 + 张力/流动/侵入治理(网络模式)
+    this.bridges.step(this.params.dt);
     // 2.5) 弹坑发射器(入水/聚合冲击分步展开,§4.4 输入事件层)
     this.advanceCraters();
     // 3) 场步进(波动 + 流动;已含第 2 步写入的动态源)

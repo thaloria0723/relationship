@@ -37,6 +37,8 @@ export class DropletPairs {
     private readonly drops: DropletSystem,
     /** 聚合涟漪出口:引擎把 (x, y, 新半径) 转成场脉冲(经弹坑发射器通道) */
     private readonly onMerge?: (x: number, y: number, rNew: number) => void,
+    /** 聚合交换删除后的通知(j 位被末滴换入;液桥端点重映射用) */
+    private readonly onRemoved?: (removedIdx: number) => void,
   ) {
     this.bridging = new Uint8Array(params.maxDroplets);
   }
@@ -180,6 +182,7 @@ export class DropletPairs {
     // 聚合涟漪(引擎出口 → 弹坑发射器通道,峰值受 couplingClamp 约束)
     this.onMerge?.(d.x[i]!, d.y[i]!, rNew);
     this.drops.removeAt(j);
+    this.onRemoved?.(j);
     this.mergeCount++;
   }
 }

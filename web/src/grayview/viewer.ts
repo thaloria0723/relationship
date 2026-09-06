@@ -67,6 +67,7 @@ export function mountGrayViewer(
   const btnReset = el<HTMLButtonElement>("gray-btn-reset");
   const btnWire = el<HTMLButtonElement>("gray-btn-wire");
   const btnDrop = el<HTMLButtonElement>("gray-btn-drop");
+  const btnPair = el<HTMLButtonElement>("gray-btn-pair");
 
   const showError = (message: string): void => {
     hudError.textContent = `启动失败:${message}`;
@@ -209,6 +210,141 @@ export function mountGrayViewer(
     dropletMesh.instanceMatrix.needsUpdate = true;
   };
 
+  // ---- 液桥渲染(任务①):颈状管(两端宽、中间窄)+ 桥内流动粒子 ----
+  const BRIDGE_LEN = 10; // 轴向环数
+  const BRIDGE_RAD = 8; // 周向边数
+  const bridgeMax = params.maxDroplets;
+  const vertsPerBridge = (BRIDGE_LEN + 1) * BRIDGE_RAD;
+  const bridgeGeo = new THREE.BufferGeometry();
+  const bridgePos = new Float32Array(bridgeMax * vertsPerBridge * 3);
+  const bridgeIdx: number[] = [];
+  for (let b = 0; b < bridgeMax; b++) {
+    const base = b * vertsPerBridge;
+    for (let s = 0; s < BRIDGE_LEN; s++) {
+      for (let r = 0; r < BRIDGE_RAD; r++) {
+        const r2 = (r + 1) % BRIDGE_RAD;
+        const a = base + s * BRIDGE_RAD + r;
+        const bb = base + s * BRIDGE_RAD + r2;
+        const c = base + (s + 1) * BRIDGE_RAD + r;
+        const dd = base + (s + 1) * BRIDGE_RAD + r2;
+        bridgeIdx.push(a, c, bb, bb, c, dd);
+      }
+    }
+  }
+  const bridgePosAttr = new THREE.BufferAttribute(bridgePos, 3);
+  bridgePosAttr.setUsage(THREE.DynamicDrawUsage);
+  bridgeGeo.setAttribute("position", bridgePosAttr);
+  bridgeGeo.setIndex(bridgeIdx);
+  const bridgeMesh = new THREE.Mesh(
+    bridgeGeo,
+    new THREE.MeshBasicMaterial({ color: 0x4a4a4a, side: THREE.DoubleSide }),
+  );
+  bridgeMesh.frustumCulled = false;
+  scene.add(bridgeMesh);
+
+  // 流动粒子:每桥 3 颗,沿桥轴迁移(方向 = 体积流量方向;速度风格化)
+  const FLOW_PER_BRIDGE = 3;
+  const flowT = new Float32Array(bridgeMax * FLOW_PER_BRIDGE);
+  const flowGeo = new THREE.BufferGeometry();
+  const flowPos = new Float32Array(bridgeMax * FLOW_PER_BRIDGE * 3);
+  const flowPosAttr = new THREE.BufferAttribute(flowPos, 3);
+  flowPosAttr.setUsage(THREE.DynamicDrawUsage);
+  flowGeo.setAttribute("position", flowPosAttr);
+  const flowPoints = new THREE.Points(
+    flowGeo,
+    new THREE.PointsMaterial({ color: 0x808080, size: 2, sizeAttenuation: false }),
+  );
+  flowPoints.frustumCulled = false;
+  scene.add(flowPoints);
+
+  const syncBridges = (dt: number): void => {
+    const bs = engine.bridges.state;
+    const d = engine.droplets.state;
+    for (let k = 0; k < bridgeMax; k++) {
+      const base = k * vertsPerBridge;
+      const active = k < bs.count && bs.cut[k] === 0;
+      if (!active) {
+        // 收缩到原点(不可见)并隐藏该桥粒子
+        for (let v = 0; v < vertsPerBridge; v++) {
+          bridgePos[(base + v) * 3] = 0;
+          bridgePos[(base + v) * 3 + 1] = 0;
+          bridgePos[(base + v) * 3 + 2] = 0;
+        }
+        for (let f = 0; f < FLOW_PER_BRIDGE; f++) {
+          flowPos[(k * FLOW_PER_BRIDGE + f) * 3 + 1] = -10;
+        }
+        continue;
+      }
+      const ia = bs.a[k]!;
+      const ib = bs.b[k]!;
+      const ax = d.x[ia]! - half;
+      const az = d.y[ia]! - half;
+      const ay = d.z[ia]!;
+      const bx = d.x[ib]! - half;
+      const bz = d.y[ib]! - half;
+      const by = d.z[ib]!;
+      // 轴与正交基
+      let ux = bx - ax;
+      let uy = by - ay;
+      let uz = bz - az;
+      const len = Math.hypot(ux, uy, uz) || 1;
+      ux /= len;
+      uy /= len;
+      uz /= len;
+      // n1 = axis × up(域内近水平轴,退化防护)
+      let n1x = uy * 0 - uz * 1;
+      let n1y = uz * 0 - ux * 0;
+      let n1z = ux * 1 - uy * 0;
+      let n1l = Math.hypot(n1x, n1y, n1z);
+      if (n1l < 1e-6) {
+        n1x = 1;
+        n1y = 0;
+        n1z = 0;
+      } else {
+        n1x /= n1l;
+        n1y /= n1l;
+        n1z /= n1l;
+      }
+      // n2 = axis × n1
+      const n2x = uy * n1z - uz * n1y;
+      const n2y = uz * n1x - ux * n1z;
+      const n2z = ux * n1y - uy * n1x;
+      const rEnd = 0.8 * Math.min(d.r[ia]!, d.r[ib]!);
+      const rNeck = 0.45 * rEnd;
+      for (let s = 0; s <= BRIDGE_LEN; s++) {
+        const t = s / BRIDGE_LEN;
+        const rr = rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5;
+        const cx = ax + (bx - ax) * t;
+        const cy = ay + (by - ay) * t;
+        const cz = az + (bz - az) * t;
+        for (let r = 0; r < BRIDGE_RAD; r++) {
+          const ang = (r / BRIDGE_RAD) * Math.PI * 2;
+          const ox = Math.cos(ang) * rr;
+          const oy = Math.sin(ang) * rr;
+          const vi = (base + s * BRIDGE_RAD + r) * 3;
+          bridgePos[vi] = cx + n1x * ox + n2x * oy;
+          bridgePos[vi + 1] = cy + n1y * ox + n2y * oy;
+          bridgePos[vi + 2] = cz + n1z * ox + n2z * oy;
+        }
+      }
+      // 流动粒子推进(方向随流量符号;速度风格化固定)
+      const q = engine.bridges.flowRate[k]!;
+      for (let f = 0; f < FLOW_PER_BRIDGE; f++) {
+        const fi = k * FLOW_PER_BRIDGE + f;
+        if (q !== 0) {
+          flowT[fi] = (flowT[fi]! + (q > 0 ? 1 : -1) * 0.25 * dt + 1) % 1;
+        }
+        const ft = flowT[fi]!;
+        const vi = fi * 3;
+        flowPos[vi] = ax + (bx - ax) * ft;
+        flowPos[vi + 1] = ay + (by - ay) * ft;
+        flowPos[vi + 2] = az + (bz - az) * ft;
+      }
+    }
+    bridgePosAttr.needsUpdate = true;
+    flowPosAttr.needsUpdate = true;
+  };
+
   const syncWireVisibility = (): void => {
     wireMesh.visible = wireOn;
     btnWire.textContent = wireOn ? "线框:开" : "线框:关";
@@ -279,6 +415,7 @@ export function mountGrayViewer(
     updateSurface();
     updateWire();
     syncDroplets();
+    syncBridges(0);
   });
   btnReset.addEventListener("click", () => {
     engine = new WaterEngine(params);
@@ -304,6 +441,18 @@ export function mountGrayViewer(
       engine.field.totalHeight(x, y) + params.dropHeight + r,
       r,
     );
+  });
+  // 落桥对:两颗半径不等的液滴落在间隙 3mm 处 → drainTime 后必然成桥,
+  // 半径差驱动拉普拉斯流动(小→大),供液桥与流动粒子验收
+  btnPair.addEventListener("click", () => {
+    const cx = 0.35 + rng() * 0.3;
+    const cy = 0.35 + rng() * 0.3;
+    const r1 = 0.016;
+    const r2 = 0.026;
+    const gap = 0.003;
+    const z0 = engine.field.totalHeight(cx, cy) + params.dropHeight;
+    engine.spawnDroplet(cx - (r1 + gap / 2), cy, z0 + r1, r1);
+    engine.spawnDroplet(cx + (r2 + gap / 2), cy, z0 + r2, r2);
   });
 
   window.addEventListener("resize", () => {
@@ -336,6 +485,7 @@ export function mountGrayViewer(
       updateSurface();
       updateWire();
       syncDroplets();
+      syncBridges(frameDt);
       hooks.tick?.(engine, frameDt);
     }
     if (captionNode) {
@@ -384,6 +534,8 @@ export function mountGrayViewer(
   bakeTotal();
   updateSurface();
   updateWire();
+  syncDroplets();
+  syncBridges(0);
   updateHud();
 }
 

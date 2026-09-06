@@ -70,3 +70,17 @@ export interface DropletState {
   anchorX: Float32Array;
   anchorY: Float32Array;
 }
+
+/** 液桥实体状态(紧凑数组 + count,交换删除) */
+export interface BridgeState {
+  count: number;
+  /** 端点液滴索引 */
+  a: Int32Array;
+  b: Int32Array;
+  /** 自然长度(成桥时两滴中心距,张力目标) */
+  restLen: Float32Array;
+  /** 焦点模式临时切断:张力关 + 不渲染 + 流量清零 */
+  cut: Uint8Array;
+  /** 侵入持续计时(秒;超 grace 断桥) */
+  intrudeT: Float32Array;
+}

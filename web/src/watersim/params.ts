@@ -94,6 +94,16 @@ export type WaterSimParams = {
   /** 钉扎松弛半径(m):离出生锚点该距离内自由漂移,超出受恢复力 */
   pinRadius: number;
 
+  // ---- 液桥(任务①,2026-09-07;物理模型收官项) ----
+  /** 桥张力劲度(N/m,绳式:仅拉伸段出力) */
+  bridgeTensionK: number;
+  /** 桥张力轴向阻尼(N·s/m) */
+  bridgeTensionC: number;
+  /** 断桥拉伸阈(×restLen;超出即断,双端进 mergeCooldown 防抖) */
+  bridgeBreakStretch: number;
+  /** 桥内流动系数(m²/s):Q = k·π·r_neck²·(1/r_a − 1/r_b),小滴 → 大滴 */
+  bridgeFlowK: number;
+
   // ---- §5.5 耦合(M2 接入) ----
   /** 凹陷核宽度(×r,3σ 截断、归一化 ∫=−V_sub,范围 0.8–2) */
   kernelSigma: number;
@@ -165,6 +175,11 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   pinStrength: 6e-3,
   pinRadius: 0.06,
 
+  bridgeTensionK: 20,
+  bridgeTensionC: 4,
+  bridgeBreakStretch: 0.6,
+  bridgeFlowK: 1.6e-5,
+
   /** 凹陷核宽度(×r,3σ 截断;默认 0.8 为验收整改裁决 B:深陡可见,范围下限,§10 预案) */
   kernelSigma: 0.8,
   impulseGain: 1.0,
@@ -224,6 +239,10 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["waveSourceFreq", 0.1, 5],
   ["dropHeight", 0.01, 1],
   ["initialFloaters", 0, 16],
+  ["bridgeTensionK", 0, 200],
+  ["bridgeTensionC", 0, 40],
+  ["bridgeBreakStretch", 0.2, 2],
+  ["bridgeFlowK", 0, 1e-3],
 ];
 
 /**
