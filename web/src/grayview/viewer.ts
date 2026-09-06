@@ -221,21 +221,23 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     }
   };
 
-  // ---- 几何同步 ----
+  // ---- 几何同步(整改 A:面/线框位移 = 动态 h + 准静态核,烘焙总高度) ----
+  const totalHeightBuf = new Float32Array(N * N);
+  const bakeTotal = (): void => {
+    engine.field.bakeTotalInto(totalHeightBuf);
+  };
   const updateSurface = (): void => {
-    const h = engine.field.state.h;
     for (let k = 0; k < N * N; k++) {
-      surfacePos[k * 3 + 1] = h[k]!;
+      surfacePos[k * 3 + 1] = totalHeightBuf[k]!;
     }
     surfacePosAttr.needsUpdate = true;
     surfaceGeo.computeBoundingSphere();
   };
   const updateWire = (): void => {
-    const h = engine.field.state.h;
     for (let s = 0; s < wireSegs.length; s++) {
       const [a, b] = wireSegs[s]!;
-      wirePos[s * 6 + 1] = h[a]!;
-      wirePos[s * 6 + 4] = h[b]!;
+      wirePos[s * 6 + 1] = totalHeightBuf[a]!;
+      wirePos[s * 6 + 4] = totalHeightBuf[b]!;
     }
     wirePosAttr.needsUpdate = true;
   };
@@ -253,6 +255,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     paused = true;
     btnPause.textContent = "继续";
     engine.stepFixed();
+    bakeTotal();
     updateSurface();
     updateWire();
     syncDroplets();
@@ -260,6 +263,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
   btnReset.addEventListener("click", () => {
     engine = new WaterEngine(params);
     scheduleReset();
+    bakeTotal();
     updateSurface();
     updateWire();
     syncDroplets();
@@ -301,6 +305,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     if (!paused) {
       applyDuePokes();
       engine.advance(frameDt);
+      bakeTotal();
       updateSurface();
       updateWire();
       syncDroplets();
@@ -321,6 +326,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
   });
 
   scheduleReset();
+  bakeTotal();
   updateSurface();
   updateWire();
   updateHud();

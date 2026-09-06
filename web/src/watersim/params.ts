@@ -152,7 +152,8 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   mergeCooldown: 0.25,
   maxDroplets: 32,
 
-  kernelSigma: 1.2,
+  /** 凹陷核宽度(×r,3σ 截断;默认 0.8 为验收整改裁决 B:深陡可见,范围下限,§10 预案) */
+  kernelSigma: 0.8,
   impulseGain: 1.0,
   depthRateGain: 1.0,
   mergeRipple: 0.5,

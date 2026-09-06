@@ -5,10 +5,13 @@
 // 插入 droplets.update 之后。确定性:固定 dt、类型化数组原地更新、固定顺序。
 // ============================================================
 
-import { DropletSystem } from "./droplet";
+import { DropletSystem, type DropletHost } from "./droplet";
 import { WaterField } from "./field";
 import { validateParams, type WaterSimParams } from "./params";
 import type { EngineStats } from "./types";
+
+/** 弹坑展开步数(裁决 D′):~67ms,每步峰值 ≪ couplingClamp,数值柔和拒平顶 */
+const CRATER_STEPS = 10;
 
 interface PendingImpulse {
   x: number;
@@ -24,7 +27,17 @@ interface PendingSpawn {
   r: number;
 }
 
-export class WaterEngine {
+/** 弹坑发射器:一次性瞬态体积源,分 CRATER_STEPS 步摊完(预分配池) */
+interface CraterEmitter {
+  active: boolean;
+  x: number;
+  y: number;
+  sigma: number;
+  volumeLeft: number;
+  stepsLeft: number;
+}
+
+export class WaterEngine implements DropletHost {
   readonly params: WaterSimParams;
   readonly field: WaterField;
   readonly droplets: DropletSystem;
@@ -33,12 +46,52 @@ export class WaterEngine {
   private acc = 0;
   private readonly pendingImpulses: PendingImpulse[] = [];
   private readonly pendingSpawns: PendingSpawn[] = [];
+  private readonly craters: CraterEmitter[];
 
   constructor(params: WaterSimParams) {
     validateParams(params);
     this.params = params;
     this.field = new WaterField(params);
-    this.droplets = new DropletSystem(params, this.field);
+    // 每颗液滴至多入水一次 ⇒ 并发弹坑 ≤ maxDroplets,池不会溢出
+    this.craters = Array.from({ length: params.maxDroplets }, () => ({
+      active: false,
+      x: 0,
+      y: 0,
+      sigma: 0,
+      volumeLeft: 0,
+      stepsLeft: 0,
+    }));
+    this.droplets = new DropletSystem(params, this.field, this);
+  }
+
+  /** 入水冲击 → 激活弹坑发射器(总量不变,分摊展开;clamp 语义不变) */
+  scheduleImpact(x: number, y: number, sigma: number, volume: number): void {
+    for (let k = 0; k < this.craters.length; k++) {
+      const c = this.craters[k]!;
+      if (!c.active) {
+        c.active = true;
+        c.x = x;
+        c.y = y;
+        c.sigma = sigma;
+        c.volumeLeft = volume;
+        c.stepsLeft = CRATER_STEPS;
+        return;
+      }
+    }
+    // 池满(理论不可达):退化为单步注入,clamp 兜底
+    this.field.addVolumeSource(x, y, sigma, volume, this.params.couplingClamp);
+  }
+
+  /** 推进全部活跃弹坑一步(管线第 1.5 步,场步进之前) */
+  private advanceCraters(): void {
+    const clamp = this.params.couplingClamp;
+    for (let k = 0; k < this.craters.length; k++) {
+      const c = this.craters[k]!;
+      if (!c.active) continue;
+      this.field.addVolumeSource(c.x, c.y, c.sigma, c.volumeLeft / c.stepsLeft, clamp);
+      c.stepsLeft--;
+      if (c.stepsLeft <= 0) c.active = false;
+    }
   }
 
   /** 入队一个高斯冲量源(脚本/调试戳点,峰值深度语义),下一固定步生效 */
@@ -88,6 +141,8 @@ export class WaterEngine {
     this.pendingSpawns.length = 0;
     // 2) 液滴单体:空中积分 / 浮态力求解 + 动态源注入(§4.4;液滴间 M3)
     this.droplets.update(this.params.dt);
+    // 2.5) 弹坑发射器(入水冲击分步展开,§4.4 输入事件层)
+    this.advanceCraters();
     // 3) 场步进(波动 + 流动;已含第 2 步写入的动态源)
     this.field.step(this.params.dt);
     // 4) 重建准静态凹陷核列表(漂浮滴 → 核)

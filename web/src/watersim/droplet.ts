@@ -15,6 +15,18 @@ import {
 import type { WaterSimParams } from "./params";
 import type { DropletState } from "./types";
 
+/**
+ * 入水瞬态的调度出口(整改裁决 D′):引擎实现本接口,把冲击总量分摊到
+ * 弹坑发射器(~10 步展开,峰值远低于 couplingClamp);无 host 时退化为
+ * 单步注入(direct 使用的测试/工具路径,clamp 同样生效)。
+ */
+export interface DropletHost {
+  scheduleImpact(x: number, y: number, sigma: number, volume: number): void;
+}
+
+/** 冲击源 σ(×r):窄于核(裁决 D′),弹坑深陡 */
+export const IMPACT_SIGMA_RATIO = 0.7;
+
 export class DropletSystem {
   readonly params: WaterSimParams;
   readonly field: WaterField;
@@ -24,7 +36,7 @@ export class DropletSystem {
 
   private readonly grad = new Float32Array(2);
 
-  constructor(params: WaterSimParams, field: WaterField) {
+  constructor(params: WaterSimParams, field: WaterField, private readonly host?: DropletHost) {
     this.params = params;
     this.field = field;
     const max = params.maxDroplets;
@@ -92,7 +104,12 @@ export class DropletSystem {
           const vzAbs = Math.abs(vzNew);
           const tContact = r / Math.max(vzAbs, 0.1); // 接触时间尺度 r/v
           const volume = p.impulseGain * r * r * vzAbs * tContact;
-          field.addVolumeSource(x, y, p.kernelSigma * r, -volume, p.couplingClamp);
+          const sigma = IMPACT_SIGMA_RATIO * r;
+          if (this.host) {
+            this.host.scheduleImpact(x, y, sigma, -volume);
+          } else {
+            field.addVolumeSource(x, y, sigma, -volume, p.couplingClamp);
+          }
           d.z[i] = field.totalHeight(x, y) + (r - d0);
         } else {
           d.vz[i] = vzNew;

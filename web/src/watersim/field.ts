@@ -27,6 +27,14 @@ const H_GRID_DIFFUSION = 0.01;
 /** 3σ 截断高斯的解析质量占比(归一化用) */
 const GAUSS_TRUNC = 1 - Math.exp(-4.5);
 
+// ---- 凹陷核形状(整改裁决 C:凹 + 外环抬升;∫ 合同 = −V_sub 严格保持)----
+// kernel(ρ) = V_sub·( β·G(ρ;2σ) − α·G(ρ;σ) ),α − β = 1 ⇒ ∫ = −V_sub。
+// 中心深凹 ≈ 17mm(r=20mm 时);rim 峰位(解析):d/dρ[β·G(ρ;2σ)−α·G(ρ;σ)]=0
+// ⇒ ρ_peak = σ·√((8/3)·ln(8α/β)) ≈ 3.21σ,峰值 ≈ +0.33mm(r=20mm 时)。
+const KERNEL_ALPHA = 1.5;
+const KERNEL_BETA = 0.5;
+const KERNEL_RIM_SIGMA = 2; // σ₂ = 2σ₁
+
 /** 截断归一化高斯密度(∫g dA = 1):液滴凹陷核与体积源共用此形状 */
 function gaussDensity(dx: number, dy: number, sigma: number): number {
   const q = (dx * dx + dy * dy) / (2 * sigma * sigma);
@@ -176,7 +184,12 @@ export class WaterField {
     const h10 = state.h[idx + 1]!;
     const h01 = state.h[idx + N]!;
     const h11 = state.h[idx + N + 1]!;
-    return h00 * (1 - fu) * (1 - fv) + h10 * fu * (1 - fv) + h01 * (1 - fu) * fv + h11 * fu * fv;
+    return (
+      h00 * (1 - fu) * (1 - fv) +
+      h10 * fu * (1 - fv) +
+      h01 * (1 - fu) * fv +
+      h11 * fu * fv
+    );
   }
 
   /** 动态 h 的中心差分梯度(写入 out[0]=∂h/∂x, out[1]=∂h/∂y) */
@@ -186,18 +199,60 @@ export class WaterField {
     out[1] = (this.sampleH(x, y + d) - this.sampleH(x, y - d)) / (2 * d);
   }
 
-  /** 总高度 = 动态 h + 准静态凹陷核(接触检测/液滴贴水/viewer 位移用) */
+  /** 总高度 = 动态 h + 准静态凹陷核(dip+rim;接触检测/液滴贴水用) */
   totalHeight(x: number, y: number): number {
     let h = this.sampleH(x, y);
     for (let k = 0; k < this.kernelCount; k++) {
       const r = this.kr[k]!;
       const sigma = this.params.kernelSigma * r;
-      const g = gaussDensity(x - this.kx[k]!, y - this.ky[k]!, sigma);
-      if (g > 0) {
-        h += -submergenceVolume(this.kd[k]!, r) * g;
+      const g1 = gaussDensity(x - this.kx[k]!, y - this.ky[k]!, sigma);
+      if (g1 > 0) {
+        h +=
+          submergenceVolume(this.kd[k]!, r) *
+          (KERNEL_BETA *
+            gaussDensity(
+              x - this.kx[k]!,
+              y - this.ky[k]!,
+              KERNEL_RIM_SIGMA * sigma,
+            ) -
+            KERNEL_ALPHA * g1);
       }
     }
     return h;
+  }
+
+  /**
+   * 烘焙总高度(h + 全部核)到节点数组(viewer 面/线框位移源)。
+   * 逐核 3σ₂ 包围盒增量写入,typical 16 滴 <3 万次 exp/帧。
+   */
+  bakeTotalInto(out: Float32Array): void {
+    out.set(this.state.h);
+    const { N, dx } = this;
+    for (let k = 0; k < this.kernelCount; k++) {
+      const r = this.kr[k]!;
+      const sigma = this.params.kernelSigma * r;
+      const sigma2 = KERNEL_RIM_SIGMA * sigma;
+      const vSub = submergenceVolume(this.kd[k]!, r);
+      const cx = this.kx[k]!;
+      const cy = this.ky[k]!;
+      const rad = Math.ceil((3 * sigma2) / dx);
+      const gi = Math.round(cx / dx);
+      const gj = Math.round(cy / dx);
+      const i0 = Math.max(0, gi - rad);
+      const i1 = Math.min(N - 1, gi + rad);
+      const j0 = Math.max(0, gj - rad);
+      const j1 = Math.min(N - 1, gj + rad);
+      for (let j = j0; j <= j1; j++) {
+        const dy = j * dx - cy;
+        for (let i = i0; i <= i1; i++) {
+          const g1 = gaussDensity(i * dx - cx, dy, sigma);
+          if (g1 <= 0) continue;
+          const g2 = gaussDensity(i * dx - cx, dy, sigma2);
+          const idx = j * N + i;
+          out[idx] = out[idx]! + vSub * (KERNEL_BETA * g2 - KERNEL_ALPHA * g1);
+        }
+      }
+    }
   }
 
   private buildSponge(): void {
@@ -256,7 +311,9 @@ export class WaterField {
       for (let j = 0; j < N; j++) {
         for (let i = 0; i < N; i++) {
           const idx = j * N + i;
-          sum += gh * h[idx]! * h[idx]! + params.meanDepth * (u[idx]! * u[idx]! + v[idx]! * v[idx]!);
+          sum +=
+            gh * h[idx]! * h[idx]! +
+            params.meanDepth * (u[idx]! * u[idx]! + v[idx]! * v[idx]!);
         }
       }
     } else {
@@ -320,7 +377,10 @@ export class WaterField {
         const hU = j < N - 1 ? h[idx + N]! : hc;
         const lamLoc = base + sponge[idx]!;
         hScratch[idx] =
-          2 * hc - hp + c2 * (hL + hR + hD + hU - 4 * hc) - 2 * lamLoc * dt * (hc - hp);
+          2 * hc -
+          hp +
+          c2 * (hL + hR + hD + hU - 4 * hc) -
+          2 * lamLoc * dt * (hc - hp);
       }
     }
     hPrev.set(h);
@@ -332,7 +392,17 @@ export class WaterField {
    * u[i,j] 位于节点 (i,j)-(i+1,j) 之间的 x 面,末列恒 0;v 同理末行恒 0。
    */
   private stepShallowWater(dt: number): void {
-    const { N, dx, params, state, hScratch, hSmooth, uScratch, vScratch, sponge } = this;
+    const {
+      N,
+      dx,
+      params,
+      state,
+      hScratch,
+      hSmooth,
+      uScratch,
+      vScratch,
+      sponge,
+    } = this;
     const { h, u, v } = state;
     const gFlow = this.gFlow;
     const muF = params.flowFriction;
@@ -360,7 +430,8 @@ export class WaterField {
         const uU = j < N - 1 ? u[idx + N]! : uc;
         const lap = uL + uR + uD + uU - 4 * uc;
         const drag = muF + 0.5 * (sponge[idx]! + sponge[idx + 1]!);
-        uScratch[idx] = (uc - dt * gFlow * gradH + nuDtDx2 * lap) / (1 + dt * drag);
+        uScratch[idx] =
+          (uc - dt * gFlow * gradH + nuDtDx2 * lap) / (1 + dt * drag);
       }
       uScratch[j * N + N - 1] = 0; // 域外面恒 0
     }
@@ -381,7 +452,8 @@ export class WaterField {
         const vU = j < N - 2 ? v[idx + N]! : vc;
         const lap = vL + vR + vD + vU - 4 * vc;
         const drag = muF + 0.5 * (sponge[idx]! + sponge[idx + N]!);
-        vScratch[idx] = (vc - dt * gFlow * gradH + nuDtDx2 * lap) / (1 + dt * drag);
+        vScratch[idx] =
+          (vc - dt * gFlow * gradH + nuDtDx2 * lap) / (1 + dt * drag);
       }
     }
     // 末行(域外面)恒 0:Float32Array 初值即 0,且从不在内层写入
@@ -391,10 +463,13 @@ export class WaterField {
     for (let j = 0; j < N; j++) {
       for (let i = 0; i < N; i++) {
         const idx = j * N + i;
-        const divU = (uScratch[idx]! - (i > 0 ? uScratch[idx - 1]! : 0)) * invDx;
-        const divV = (vScratch[idx]! - (j > 0 ? vScratch[idx - N]! : 0)) * invDx;
+        const divU =
+          (uScratch[idx]! - (i > 0 ? uScratch[idx - 1]! : 0)) * invDx;
+        const divV =
+          (vScratch[idx]! - (j > 0 ? vScratch[idx - N]! : 0)) * invDx;
         const hc = h[idx]!;
-        hScratch[idx] = (hc - dt * depth * (divU + divV)) / (1 + dt * (base + sponge[idx]!));
+        hScratch[idx] =
+          (hc - dt * depth * (divU + divV)) / (1 + dt * (base + sponge[idx]!));
       }
     }
 
