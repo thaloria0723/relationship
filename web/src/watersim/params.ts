@@ -57,6 +57,8 @@ export type WaterSimParams = {
   gravity: number;
   /** 水的动力黏度(Pa·s,M2 阻力) */
   waterMu: number;
+  /** 水的密度 ρ_w(kg/m³;物理常量非调参,Stokes 阻力质量项 m=ρ_d·V_R 所需) */
+  waterRho: number;
   /** 浸深一阶弛豫时间常数 τ_b(秒,范围 0.01–0.1) */
   relaxTau: number;
   /** 坡度力增益(波推液滴,范围 0–1.5) */
@@ -135,6 +137,7 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   rMax: 0.028,
   gravity: 9.81,
   waterMu: 1e-3,
+  waterRho: 1000,
   relaxTau: 0.03,
   slopeCoupling: 1.0,
   shapeStiffness: 40,
@@ -182,6 +185,7 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["rMax", 0.002, 0.2],
   ["gravity", 1, 30],
   ["waterMu", 1e-5, 1e-1],
+  ["waterRho", 500, 2000],
   ["relaxTau", 0.01, 0.1],
   ["slopeCoupling", 0, 1.5],
   ["shapeStiffness", 10, 120],

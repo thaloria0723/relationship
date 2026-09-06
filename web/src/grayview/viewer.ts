@@ -48,6 +48,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
   const btnStep = el<HTMLButtonElement>("gray-btn-step");
   const btnReset = el<HTMLButtonElement>("gray-btn-reset");
   const btnWire = el<HTMLButtonElement>("gray-btn-wire");
+  const btnDrop = el<HTMLButtonElement>("gray-btn-drop");
 
   const showError = (message: string): void => {
     hudError.textContent = `启动失败:${message}`;
@@ -159,6 +160,35 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
   );
   scene.add(wireMesh);
 
+  // ---- 液滴:灰 #4A4A4A 球,InstancedMesh;y 向缩放 1−ε 的形变在 M3 接入 ----
+  const dropletMesh = new THREE.InstancedMesh(
+    new THREE.SphereGeometry(1, 24, 16),
+    new THREE.MeshBasicMaterial({ color: 0x4a4a4a }),
+    params.maxDroplets,
+  );
+  dropletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  dropletMesh.frustumCulled = false;
+  dropletMesh.count = 0;
+  scene.add(dropletMesh);
+
+  const dropletMatrix = new THREE.Matrix4();
+  const syncDroplets = (): void => {
+    const d = engine.droplets.state;
+    dropletMesh.count = d.count;
+    for (let i = 0; i < d.count; i++) {
+      const r = d.r[i]!;
+      dropletMatrix.makeScale(r, r, r);
+      // 液滴坐标是米(非格索引):世界位 = 米 − 半域
+      dropletMatrix.setPosition(
+        d.x[i]! - half,
+        d.z[i]!, // 引擎维护:总高 + (R − d)(空中段为积分高度)
+        d.y[i]! - half,
+      );
+      dropletMesh.setMatrixAt(i, dropletMatrix);
+    }
+    dropletMesh.instanceMatrix.needsUpdate = true;
+  };
+
   const syncWireVisibility = (): void => {
     wireMesh.visible = wireOn;
     btnWire.textContent = wireOn ? "线框:开" : "线框:关";
@@ -225,16 +255,25 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     engine.stepFixed();
     updateSurface();
     updateWire();
+    syncDroplets();
   });
   btnReset.addEventListener("click", () => {
     engine = new WaterEngine(params);
     scheduleReset();
     updateSurface();
     updateWire();
+    syncDroplets();
   });
   btnWire.addEventListener("click", () => {
     wireOn = !wireOn;
     syncWireVisibility();
+  });
+  // 调试按钮(§1 非目标允许调试按钮):中心附近随机落一滴
+  btnDrop.addEventListener("click", () => {
+    const r = params.rMin + rng() * (params.rMax - params.rMin);
+    const x = 0.35 + rng() * 0.3;
+    const y = 0.35 + rng() * 0.3;
+    engine.spawnDroplet(x, y, engine.field.totalHeight(x, y) + params.dropHeight + r, r);
   });
 
   window.addEventListener("resize", () => {
@@ -253,7 +292,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     hudTime.textContent = engine.stats.simTime.toFixed(2);
     hudSteps.textContent = String(engine.stats.stepCount);
     hudEnergy.textContent = engine.field.energy().toExponential(2);
-    hudDroplets.textContent = "— (M2)";
+    hudDroplets.textContent = String(engine.droplets.state.count);
     hudMerges.textContent = "— (M3)";
   };
 
@@ -264,6 +303,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
       engine.advance(frameDt);
       updateSurface();
       updateWire();
+      syncDroplets();
     }
     controls.update();
     renderer.render(scene, camera);

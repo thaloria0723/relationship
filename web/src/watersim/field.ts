@@ -24,6 +24,46 @@ const SPONGE_PEAK = 60;
  */
 const H_GRID_DIFFUSION = 0.01;
 
+/** 3σ 截断高斯的解析质量占比(归一化用) */
+const GAUSS_TRUNC = 1 - Math.exp(-4.5);
+
+/** 截断归一化高斯密度(∫g dA = 1):液滴凹陷核与体积源共用此形状 */
+function gaussDensity(dx: number, dy: number, sigma: number): number {
+  const q = (dx * dx + dy * dy) / (2 * sigma * sigma);
+  if (q > 9) return 0;
+  return Math.exp(-q) / (2 * Math.PI * sigma * sigma * GAUSS_TRUNC);
+}
+
+// ============================================================
+// 球缺几何与浮力平衡(§4.2,纯函数;测试直测残差)
+// ============================================================
+
+/** 球缺浸没体积 V(d) = πd²(R − d/3),d ∈ [0, 2R](d 自底部量起) */
+export function submergenceVolume(d: number, R: number): number {
+  return Math.PI * d * d * (R - d / 3);
+}
+
+/**
+ * 解浮力平衡 V(d*) = densityRatio·V_R。
+ * V(d) 在 (0, 2R) 单调递增,Newton 收敛;残差 ~1e-15。
+ */
+export function solveEquilibriumDepth(R: number, densityRatio: number): number {
+  const vR = (4 / 3) * Math.PI * R * R * R;
+  const target = densityRatio * vR;
+  let d = R;
+  const lo = 1e-6 * R;
+  const hi = 2 * R - 1e-6 * R;
+  for (let it = 0; it < 32; it++) {
+    const f = submergenceVolume(d, R) - target;
+    const fp = Math.PI * d * (2 * R - d);
+    d -= f / fp;
+    if (d < lo) d = lo;
+    if (d > hi) d = hi;
+    if (Math.abs(f) < 1e-12 * vR) break;
+  }
+  return d;
+}
+
 export class WaterField {
   readonly params: WaterSimParams;
   readonly N: number;
@@ -36,8 +76,15 @@ export class WaterField {
   private readonly vScratch: Float32Array;
   /** 每格附加阻尼 λ_local(s⁻¹),absorb 模式边缘带内非零 */
   private readonly sponge: Float32Array;
-  /** 流动层驱动重力 g_flow = c²/H */
-  private readonly gFlow: number;
+  /** 流动层驱动重力 g_flow = c²/H(公开:液滴坡度力用同一派生重力) */
+  readonly gFlow: number;
+
+  // ---- 准静态凹陷核列表(§2.1 Distortion / §4.4 重建;静态部分不走反馈回路) ----
+  private readonly kx: Float32Array;
+  private readonly ky: Float32Array;
+  private readonly kr: Float32Array;
+  private readonly kd: Float32Array;
+  private kernelCount = 0;
 
   constructor(params: WaterSimParams) {
     validateParams(params);
@@ -52,13 +99,105 @@ export class WaterField {
       u: new Float32Array(n2),
       v: new Float32Array(n2),
     };
+    this.sponge = new Float32Array(n2);
     this.hScratch = new Float32Array(n2);
     this.hSmooth = new Float32Array(n2);
     this.uScratch = new Float32Array(n2);
     this.vScratch = new Float32Array(n2);
-    this.sponge = new Float32Array(n2);
     this.gFlow = (params.waveSpeed * params.waveSpeed) / params.meanDepth;
+    this.kx = new Float32Array(params.maxDroplets);
+    this.ky = new Float32Array(params.maxDroplets);
+    this.kr = new Float32Array(params.maxDroplets);
+    this.kd = new Float32Array(params.maxDroplets);
     this.buildSponge();
+  }
+
+  /** 重建核列表:先置数量(0 = 清空),再逐个 setKernel(§4.4 管线第 5 步) */
+  setKernelCount(n: number): void {
+    this.kernelCount = Math.min(n, this.params.maxDroplets);
+  }
+
+  /** 第 i 个核:漂浮液滴 (x, y, r, 浸深 d) → 凹陷 ∫ = −V_sub(d) */
+  setKernel(i: number, x: number, y: number, r: number, d: number): void {
+    this.kx[i] = x;
+    this.ky[i] = y;
+    this.kr[i] = r;
+    this.kd[i] = d;
+  }
+
+  /**
+   * 体积源:高斯形状写入 h,总高度积分 = volume(负为凹陷),
+   * 单点单步钳制 ±clampPerPoint(§5.5 couplingClamp,防反馈发散)。
+   * 与 addImpulse(峰值深度语义)不同,这是液滴耦合源的规范入口。
+   */
+  addVolumeSource(
+    cx: number,
+    cy: number,
+    sigma: number,
+    volume: number,
+    clampPerPoint: number,
+  ): void {
+    const { N, dx, state } = this;
+    const cellSigma = sigma / dx;
+    const rad = Math.ceil(3 * cellSigma);
+    const gx = cx / dx;
+    const gy = cy / dx;
+    const i0 = Math.max(0, Math.floor(gx) - rad);
+    const i1 = Math.min(N - 1, Math.ceil(gx) + rad);
+    const j0 = Math.max(0, Math.floor(gy) - rad);
+    const j1 = Math.min(N - 1, Math.ceil(gy) + rad);
+    const h = state.h;
+    for (let j = j0; j <= j1; j++) {
+      const dy = j * dx - cy;
+      for (let i = i0; i <= i1; i++) {
+        const g = gaussDensity(i * dx - cx, dy, sigma);
+        if (g > 0) {
+          const idx = j * N + i;
+          const add = volume * g;
+          if (add > clampPerPoint) h[idx] = h[idx]! + clampPerPoint;
+          else if (add < -clampPerPoint) h[idx] = h[idx]! - clampPerPoint;
+          else h[idx] = h[idx]! + add;
+        }
+      }
+    }
+  }
+
+  /** 动态 h 的双线性采样(不含核;坡度力用,准静态部分不进反馈) */
+  sampleH(x: number, y: number): number {
+    const { N, dx, state } = this;
+    const u = Math.min(Math.max(x / dx, 0), N - 1.000001);
+    const v = Math.min(Math.max(y / dx, 0), N - 1.000001);
+    const i = Math.floor(u);
+    const j = Math.floor(v);
+    const fu = u - i;
+    const fv = v - j;
+    const idx = j * N + i;
+    const h00 = state.h[idx]!;
+    const h10 = state.h[idx + 1]!;
+    const h01 = state.h[idx + N]!;
+    const h11 = state.h[idx + N + 1]!;
+    return h00 * (1 - fu) * (1 - fv) + h10 * fu * (1 - fv) + h01 * (1 - fu) * fv + h11 * fu * fv;
+  }
+
+  /** 动态 h 的中心差分梯度(写入 out[0]=∂h/∂x, out[1]=∂h/∂y) */
+  sampleGradient(x: number, y: number, out: Float32Array): void {
+    const d = this.dx;
+    out[0] = (this.sampleH(x + d, y) - this.sampleH(x - d, y)) / (2 * d);
+    out[1] = (this.sampleH(x, y + d) - this.sampleH(x, y - d)) / (2 * d);
+  }
+
+  /** 总高度 = 动态 h + 准静态凹陷核(接触检测/液滴贴水/viewer 位移用) */
+  totalHeight(x: number, y: number): number {
+    let h = this.sampleH(x, y);
+    for (let k = 0; k < this.kernelCount; k++) {
+      const r = this.kr[k]!;
+      const sigma = this.params.kernelSigma * r;
+      const g = gaussDensity(x - this.kx[k]!, y - this.ky[k]!, sigma);
+      if (g > 0) {
+        h += -submergenceVolume(this.kd[k]!, r) * g;
+      }
+    }
+    return h;
   }
 
   private buildSponge(): void {

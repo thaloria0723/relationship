@@ -26,4 +26,31 @@ export interface EngineStats {
   simTime: number;
   /** 已执行固定步数 */
   stepCount: number;
+  /** 累计入水次数(空中→漂浮转换) */
+  impacts: number;
+}
+
+/**
+ * 液滴个体状态(紧凑数组 + count,交换删除)。
+ * 水平坐标 (x,y) 米;垂直 z 为液滴中心相对平均水面的高度(向上为正)。
+ * 浸深 d 为球缺深度(底部浸入水面的深度,§4.2)。
+ */
+export interface DropletState {
+  count: number;
+  x: Float32Array;
+  y: Float32Array;
+  z: Float32Array;
+  /** 垂直速度(仅空中段积分) */
+  vz: Float32Array;
+  /** 水平速度(浮态段坡度力/阻力) */
+  vx: Float32Array;
+  vy: Float32Array;
+  /** 半径(出生固定) */
+  r: Float32Array;
+  /** 当前浸深 d */
+  d: Float32Array;
+  /** 平衡浸深 d*(出生时由浮力平衡解出,只依赖 r 与 densityRatio) */
+  dStar: Float32Array;
+  /** 0=空中 1=漂浮 */
+  floating: Uint8Array;
 }
