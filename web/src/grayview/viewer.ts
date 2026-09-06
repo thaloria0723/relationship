@@ -324,7 +324,7 @@ export function mountGrayViewer(
   };
 
   const captionNode = document.getElementById("gray-caption");
-  renderer.setAnimationLoop(() => {
+  const tick = (): void => {
     const frameDt = Math.min(clock.getDelta(), 0.1);
     if (!paused) {
       if (!hooks.disablePokes) applyDuePokes();
@@ -355,7 +355,27 @@ export function mountGrayViewer(
       hudAt = now;
       updateHud();
     }
+  };
+
+  // WebGL 上下文丢失/恢复(§4 运行时要求):多标签/省电回收后画布会永久黑屏,
+  // 必须显式处理。丢失 → 停循环 + 红字提示;恢复 → three 自动重建 GPU 资源,重启循环。
+  renderer.domElement.addEventListener("webglcontextlost", (e) => {
+    e.preventDefault();
+    renderer.setAnimationLoop(null);
+    showError("WebGL 上下文已丢失(常见于多标签切换或系统省电回收)。点击本提示或刷新页面即可恢复。");
   });
+  hudError.addEventListener("click", () => {
+    if (hudError.style.display !== "none") {
+      hudError.style.display = "none";
+    }
+  });
+  renderer.domElement.addEventListener("webglcontextrestored", () => {
+    hudError.style.display = "none";
+    clock.getDelta(); // 丢弃停循环期间积压的时长,避免时间跳跃
+    renderer.setAnimationLoop(tick);
+  });
+
+  renderer.setAnimationLoop(tick);
 
   scheduleReset();
   bakeTotal();
