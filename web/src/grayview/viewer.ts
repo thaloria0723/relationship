@@ -35,9 +35,22 @@ function el<T extends HTMLElement>(id: string): T {
   return node as T;
 }
 
+/**
+ * 查看器钩子(演示页 demo.ts 使用;普通灰模页不传):
+ * - tick:每渲染帧在物理步进后调用(拿到引擎实时句柄,驱动时间线事件)
+ * - caption:返回当前字幕文本(null 隐藏),渲染到 #gray-caption(若页面存在)
+ */
+export interface ViewerHooks {
+  /** 禁用内置随机戳点脚本(演示页用自己的时间线接管) */
+  disablePokes?: boolean;
+  tick?: (engine: WaterEngine, frameDt: number) => void;
+  caption?: (simTime: number) => string | null;
+}
+
 export function mountGrayViewer(
   container: HTMLElement,
   params: WaterSimParams = defaultParams,
+  hooks: ViewerHooks = {},
 ): void {
   // ---- HUD 引用 ----
   const hudError = el<HTMLDivElement>("gray-error");
@@ -310,15 +323,24 @@ export function mountGrayViewer(
     hudMerges.textContent = String(engine.stats.merges);
   };
 
+  const captionNode = document.getElementById("gray-caption");
   renderer.setAnimationLoop(() => {
     const frameDt = Math.min(clock.getDelta(), 0.1);
     if (!paused) {
-      applyDuePokes();
+      if (!hooks.disablePokes) applyDuePokes();
       engine.advance(frameDt);
       bakeTotal();
       updateSurface();
       updateWire();
       syncDroplets();
+      hooks.tick?.(engine, frameDt);
+    }
+    if (captionNode) {
+      const text = paused
+        ? null
+        : (hooks.caption?.(engine.stats.simTime) ?? null);
+      captionNode.textContent = text ?? "";
+      captionNode.style.display = text ? "block" : "none";
     }
     controls.update();
     renderer.render(scene, camera);
