@@ -5,8 +5,9 @@
 // 插入 droplets.update 之后。确定性:固定 dt、类型化数组原地更新、固定顺序。
 // ============================================================
 
-import { DropletSystem, type DropletHost } from "./droplet";
+import { DropletSystem, IMPACT_SIGMA_RATIO, type DropletHost } from "./droplet";
 import { WaterField } from "./field";
+import { DropletPairs } from "./pairs";
 import { validateParams, type WaterSimParams } from "./params";
 import type { EngineStats } from "./types";
 
@@ -41,7 +42,13 @@ export class WaterEngine implements DropletHost {
   readonly params: WaterSimParams;
   readonly field: WaterField;
   readonly droplets: DropletSystem;
-  readonly stats: EngineStats = { simTime: 0, stepCount: 0, impacts: 0 };
+  readonly pairs: DropletPairs;
+  readonly stats: EngineStats = {
+    simTime: 0,
+    stepCount: 0,
+    impacts: 0,
+    merges: 0,
+  };
 
   private acc = 0;
   private readonly pendingImpulses: PendingImpulse[] = [];
@@ -62,6 +69,16 @@ export class WaterEngine implements DropletHost {
       stepsLeft: 0,
     }));
     this.droplets = new DropletSystem(params, this.field, this);
+    // 聚合涟漪:与入水弹坑同通道(分步展开,峰值受 clamp 约束)。
+    // 脉冲体积 ∝ mergeRipple·rNew³(体积量纲,风格化幅度系数 §5.5)
+    this.pairs = new DropletPairs(params, this.droplets, (x, y, rNew) => {
+      this.scheduleImpact(
+        x,
+        y,
+        IMPACT_SIGMA_RATIO * rNew,
+        -this.params.mergeRipple * rNew * rNew * rNew,
+      );
+    });
   }
 
   /** 入水冲击 → 激活弹坑发射器(总量不变,分摊展开;clamp 语义不变) */
@@ -88,7 +105,13 @@ export class WaterEngine implements DropletHost {
     for (let k = 0; k < this.craters.length; k++) {
       const c = this.craters[k]!;
       if (!c.active) continue;
-      this.field.addVolumeSource(c.x, c.y, c.sigma, c.volumeLeft / c.stepsLeft, clamp);
+      this.field.addVolumeSource(
+        c.x,
+        c.y,
+        c.sigma,
+        c.volumeLeft / c.stepsLeft,
+        clamp,
+      );
       c.stepsLeft--;
       if (c.stepsLeft <= 0) c.active = false;
     }
@@ -101,7 +124,10 @@ export class WaterEngine implements DropletHost {
 
   /** 入队出生一颗液滴(z 为中心高度),下一固定步生效;超限在生效时拒收 */
   spawnDroplet(x: number, y: number, z: number, r: number): boolean {
-    if (this.droplets.state.count + this.pendingSpawns.length >= this.params.maxDroplets) {
+    if (
+      this.droplets.state.count + this.pendingSpawns.length >=
+      this.params.maxDroplets
+    ) {
       return false;
     }
     this.pendingSpawns.push({ x, y, z, r });
@@ -139,9 +165,11 @@ export class WaterEngine implements DropletHost {
       this.droplets.spawn(p.x, p.y, p.z, p.r);
     }
     this.pendingSpawns.length = 0;
-    // 2) 液滴单体:空中积分 / 浮态力求解 + 动态源注入(§4.4;液滴间 M3)
+    // 2) 液滴单体:空中积分 / 浮态力求解 + 动态源注入(§4.4)
     this.droplets.update(this.params.dt);
-    // 2.5) 弹坑发射器(入水冲击分步展开,§4.4 输入事件层)
+    // 2.2) 液滴间(M3):碰撞冲量+去穿透 → 毛细吸引 → 聚合判定与执行
+    this.pairs.step(this.params.dt);
+    // 2.5) 弹坑发射器(入水/聚合冲击分步展开,§4.4 输入事件层)
     this.advanceCraters();
     // 3) 场步进(波动 + 流动;已含第 2 步写入的动态源)
     this.field.step(this.params.dt);
@@ -155,9 +183,10 @@ export class WaterEngine implements DropletHost {
       }
     }
     this.field.setKernelCount(n);
-    // 5) 统计(入水计数由 DropletSystem 累计)
+    // 5) 统计(入水计数由 DropletSystem 累计,聚合计数由 DropletPairs 累计)
     this.stats.simTime += this.params.dt;
     this.stats.stepCount++;
     this.stats.impacts = this.droplets.impacts;
+    this.stats.merges = this.pairs.mergeCount;
   }
 }

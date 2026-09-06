@@ -28,6 +28,8 @@ export interface EngineStats {
   stepCount: number;
   /** 累计入水次数(空中→漂浮转换) */
   impacts: number;
+  /** 累计聚合次数(M3,只增不减) */
+  merges: number;
 }
 
 /**
@@ -45,7 +47,7 @@ export interface DropletState {
   /** 水平速度(浮态段坡度力/阻力) */
   vx: Float32Array;
   vy: Float32Array;
-  /** 半径(出生固定) */
+  /** 半径(出生固定;聚合时按 r=(r₁³+r₂³)^(1/3) 合并) */
   r: Float32Array;
   /** 当前浸深 d */
   d: Float32Array;
@@ -53,4 +55,12 @@ export interface DropletState {
   dStar: Float32Array;
   /** 0=空中 1=漂浮 */
   floating: Uint8Array;
+  /** 当前压扁 ε(0=球形;渲染 y 向缩放 1−ε,§4.3 Deformation) */
+  eps: Float32Array;
+  /** ε′(形状弹簧速度) */
+  epsVel: Float32Array;
+  /** 桥接持续计时(排液延迟累计,聚合判定用;离开桥接区间即清零) */
+  bridgeT: Float32Array;
+  /** 聚合冷却剩余(秒;防合并后瞬聚,§5.4 mergeCooldown) */
+  cooldown: Float32Array;
 }

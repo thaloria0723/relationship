@@ -36,7 +36,11 @@ export class DropletSystem {
 
   private readonly grad = new Float32Array(2);
 
-  constructor(params: WaterSimParams, field: WaterField, private readonly host?: DropletHost) {
+  constructor(
+    params: WaterSimParams,
+    field: WaterField,
+    private readonly host?: DropletHost,
+  ) {
     this.params = params;
     this.field = field;
     const max = params.maxDroplets;
@@ -52,6 +56,10 @@ export class DropletSystem {
       d: new Float32Array(max),
       dStar: new Float32Array(max),
       floating: new Uint8Array(max),
+      eps: new Float32Array(max),
+      epsVel: new Float32Array(max),
+      bridgeT: new Float32Array(max),
+      cooldown: new Float32Array(max),
     };
   }
 
@@ -71,8 +79,57 @@ export class DropletSystem {
     d.d[i] = 0;
     d.dStar[i] = solveEquilibriumDepth(r, this.params.densityRatio);
     d.floating[i] = 0;
+    d.eps[i] = 0;
+    d.epsVel[i] = 0;
+    d.bridgeT[i] = 0;
+    d.cooldown[i] = 0;
     d.count = i + 1;
     return true;
+  }
+
+  /**
+   * 交换删除第 i 颗滴(M3 聚合用):把最后一滴搬到 i 并 count−1。
+   * 所有并行数组同步搬运;语义与「液滴个体状态(紧凑数组 + count,交换删除)」一致。
+   */
+  removeAt(i: number): void {
+    const d = this.state;
+    const last = d.count - 1;
+    if (i !== last) {
+      d.x[i] = d.x[last]!;
+      d.y[i] = d.y[last]!;
+      d.z[i] = d.z[last]!;
+      d.vz[i] = d.vz[last]!;
+      d.vx[i] = d.vx[last]!;
+      d.vy[i] = d.vy[last]!;
+      d.r[i] = d.r[last]!;
+      d.d[i] = d.d[last]!;
+      d.dStar[i] = d.dStar[last]!;
+      d.floating[i] = d.floating[last]!;
+      d.eps[i] = d.eps[last]!;
+      d.epsVel[i] = d.epsVel[last]!;
+      d.bridgeT[i] = d.bridgeT[last]!;
+      d.cooldown[i] = d.cooldown[last]!;
+    }
+    d.count = last;
+  }
+
+  /**
+   * 形状弹簧一步(§4.3 Deformation):ε'' = k_st(ε_eq−ε) − c_st·ε′,
+   * ε_eq = ε_max·(V_sub/V)。半隐式 Euler;浮态滴每步调用。
+   * 碰撞/聚合的 ε 踢振 = 直接给 epsVel 加冲量(由 pairs.ts 完成)。
+   */
+  stepShapeSpring(i: number, dt: number): void {
+    const d = this.state;
+    const p = this.params;
+    const r = d.r[i]!;
+    const vR = (4 / 3) * Math.PI * r * r * r;
+    const vSub = submergenceVolume(d.d[i]!, r);
+    const epsEq = p.epsMax * Math.min(vSub / vR, 1);
+    // 半隐式 Euler:先更新速度再更新位置(弹簧稳定性:k·dt² < 4;dt=1/150、k=40 时 dt²k≈0.0018)
+    const acc =
+      p.shapeStiffness * (epsEq - d.eps[i]!) - p.shapeDamping * d.epsVel[i]!;
+    d.epsVel[i] = d.epsVel[i]! + acc * dt;
+    d.eps[i] = Math.min(Math.max(d.eps[i]! + d.epsVel[i]! * dt, 0), p.epsMax);
   }
 
   /** 推进一颗(dt = 固定步长) */
@@ -119,7 +176,7 @@ export class DropletSystem {
       }
 
       // ---------- 浮态段 ----------
-      // 1) 浸深弛豫:d → d*(一阶,τ_b,§4.2)
+      // 1) 浸深弛豫:d → d*(一阶,τ_b,§4.2)(聚合冷却递减在 pairs.ts 统一做)
       const relax = dt / p.relaxTau;
       const dOld = d.d[i]!;
       const dNew = dOld + (d.dStar[i]! - dOld) * (relax < 1 ? relax : 1);
@@ -140,9 +197,11 @@ export class DropletSystem {
       field.sampleGradient(x, y, grad);
       const vR = (4 / 3) * Math.PI * r * r * r;
       const vSub = submergenceVolume(dNew, r);
-      const aSlope = (-p.slopeCoupling * field.gFlow * (vSub / vR)) / p.densityRatio;
+      const aSlope =
+        (-p.slopeCoupling * field.gFlow * (vSub / vR)) / p.densityRatio;
       // 4) Stokes 阻力:a = −6πμr·v / m,m = ratio·ρ_w·V_R
-      const aDrag = (6 * Math.PI * p.waterMu * r) / (p.densityRatio * p.waterRho * vR);
+      const aDrag =
+        (6 * Math.PI * p.waterMu * r) / (p.densityRatio * p.waterRho * vR);
       const vx = d.vx[i]! + aSlope * grad[0]! * dt - aDrag * d.vx[i]! * dt;
       const vy = d.vy[i]! + aSlope * grad[1]! * dt - aDrag * d.vy[i]! * dt;
       d.vx[i] = vx;
@@ -151,6 +210,8 @@ export class DropletSystem {
       d.y[i] = Math.min(Math.max(y + vy * dt, lo), hi);
       // 5) 贴水:中心 = 总高 + (R − d)
       d.z[i] = field.totalHeight(d.x[i]!, d.y[i]!) + (r - dNew);
+      // 6) 形状弹簧(§4.3 Deformation;碰撞/聚合踢振由 pairs.ts 注入 epsVel)
+      this.stepShapeSpring(i, dt);
     }
   }
 }

@@ -35,7 +35,10 @@ function el<T extends HTMLElement>(id: string): T {
   return node as T;
 }
 
-export function mountGrayViewer(container: HTMLElement, params: WaterSimParams = defaultParams): void {
+export function mountGrayViewer(
+  container: HTMLElement,
+  params: WaterSimParams = defaultParams,
+): void {
   // ---- HUD 引用 ----
   const hudError = el<HTMLDivElement>("gray-error");
   const hudFps = el<HTMLSpanElement>("gray-fps");
@@ -127,7 +130,8 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
   scene.add(surface);
 
   // ---- 线框:64×64 降采样 LineSegments(几何显示,非光照) ----
-  const wireIdx = (k: number): number => Math.round((k * (N - 1)) / (WIRE_N - 1));
+  const wireIdx = (k: number): number =>
+    Math.round((k * (N - 1)) / (WIRE_N - 1));
   const wireSegs: [number, number][] = [];
   for (let j = 0; j < WIRE_N; j++) {
     const r = wireIdx(j); // 采样行
@@ -177,7 +181,8 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     dropletMesh.count = d.count;
     for (let i = 0; i < d.count; i++) {
       const r = d.r[i]!;
-      dropletMatrix.makeScale(r, r, r);
+      // y 向压扁形变(§4.3 Deformation):scale = (r, r·(1−ε), r)
+      dropletMatrix.makeScale(r, r * (1 - d.eps[i]!), r);
       // 液滴坐标是米(非格索引):世界位 = 米 − 半域
       dropletMatrix.setPosition(
         d.x[i]! - half,
@@ -277,7 +282,12 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     const r = params.rMin + rng() * (params.rMax - params.rMin);
     const x = 0.35 + rng() * 0.3;
     const y = 0.35 + rng() * 0.3;
-    engine.spawnDroplet(x, y, engine.field.totalHeight(x, y) + params.dropHeight + r, r);
+    engine.spawnDroplet(
+      x,
+      y,
+      engine.field.totalHeight(x, y) + params.dropHeight + r,
+      r,
+    );
   });
 
   window.addEventListener("resize", () => {
@@ -297,7 +307,7 @@ export function mountGrayViewer(container: HTMLElement, params: WaterSimParams =
     hudSteps.textContent = String(engine.stats.stepCount);
     hudEnergy.textContent = engine.field.energy().toExponential(2);
     hudDroplets.textContent = String(engine.droplets.state.count);
-    hudMerges.textContent = "— (M3)";
+    hudMerges.textContent = String(engine.stats.merges);
   };
 
   renderer.setAnimationLoop(() => {

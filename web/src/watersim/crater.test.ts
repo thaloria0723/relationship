@@ -90,15 +90,21 @@ describe("整改 D′:分步弹坑发射器", () => {
   });
 
   it("落雨稳定性:持续出生落滴 10k 步无 NaN、maxAbsH 有界(弹坑发射器回归)", () => {
-    const params: WaterSimParams = { ...defaultParams, waveDamping: 0.3 };
+    // capillaryA=0 + 5×4 唯一网格(间距 0.18 ≫ 2rMax+bridge):互不聚合,
+    // count===20 才能同时锁定「弹坑发射器」与「聚合不误触发」两条回归线
+    const params: WaterSimParams = {
+      ...defaultParams,
+      waveDamping: 0.3,
+      capillaryA: 0,
+    };
     const engine = new WaterEngine(params);
     let maxH = 0;
     let spawned = 0;
     for (let s = 0; s < 10000; s++) {
       if (s % 450 === 0 && spawned < 20) {
         const r = spawned % 2 === 0 ? params.rMin : params.rMax;
-        const gx = 0.25 + ((spawned * 3) % 5) * 0.12;
-        const gy = 0.25 + ((spawned * 7) % 5) * 0.12;
+        const gx = 0.14 + (spawned % 5) * 0.18; // 5×4 网格,20 个唯一点
+        const gy = 0.14 + Math.floor(spawned / 5) * 0.18;
         engine.spawnDroplet(gx, gy, 0.15 + r, r);
         spawned++;
       }
@@ -107,6 +113,7 @@ describe("整改 D′:分步弹坑发射器", () => {
     }
     expect(engine.stats.impacts).toBe(20);
     expect(engine.droplets.state.count).toBe(20);
+    expect(engine.stats.merges).toBe(0);
     expect(Number.isFinite(maxH)).toBe(true);
     expect(maxH).toBeLessThan(0.2);
   }, 60000);
