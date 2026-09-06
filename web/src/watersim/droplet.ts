@@ -34,6 +34,13 @@ export class DropletSystem {
   /** 累计入水次数(空中→漂浮转换,只增不减) */
   impacts = 0;
 
+  /** 悬停液滴索引(−1 无;模块②意图) */
+  hovered = -1;
+  /** 拖拽液滴索引(−1 无)与指针目标点 */
+  dragIndex = -1;
+  dragTX = 0;
+  dragTY = 0;
+
   private readonly grad = new Float32Array(2);
 
   constructor(
@@ -62,6 +69,12 @@ export class DropletSystem {
       cooldown: new Float32Array(max),
       anchorX: new Float32Array(max),
       anchorY: new Float32Array(max),
+      lift: new Float32Array(max),
+      homeX: new Float32Array(max),
+      homeY: new Float32Array(max),
+      drag: new Uint8Array(max),
+      returning: new Uint8Array(max),
+      lev: new Uint8Array(max),
     };
   }
 
@@ -87,6 +100,12 @@ export class DropletSystem {
     d.cooldown[i] = 0;
     d.anchorX[i] = d.x[i];
     d.anchorY[i] = d.y[i];
+    d.lift[i] = 0;
+    d.homeX[i] = d.x[i];
+    d.homeY[i] = d.y[i];
+    d.drag[i] = 0;
+    d.returning[i] = 0;
+    d.lev[i] = 0;
     d.count = i + 1;
     return true;
   }
@@ -138,6 +157,47 @@ export class DropletSystem {
     d.eps[i] = Math.min(Math.max(d.eps[i]! + d.epsVel[i]! * dt, 0), p.epsMax);
   }
 
+  // ---- 模块②意图 API(引擎转发;物理在 update 内承接) ----
+  setHovered(i: number): void {
+    this.hovered = i;
+  }
+
+  beginDrag(i: number, x: number, y: number): void {
+    const d = this.state;
+    if (i < 0 || i >= d.count) return;
+    this.dragIndex = i;
+    d.drag[i] = 1;
+    d.returning[i] = 0;
+    this.dragTX = x;
+    this.dragTY = y;
+  }
+
+  setDragTarget(x: number, y: number): void {
+    this.dragTX = x;
+    this.dragTY = y;
+  }
+
+  endDrag(): void {
+    const i = this.dragIndex;
+    if (i < 0) return;
+    const d = this.state;
+    d.drag[i] = 0;
+    d.returning[i] = 1; // home 保持 beginDrag 时的抓取位 → 释放后缓慢弹回原位
+    this.dragIndex = -1;
+  }
+
+  setLevitate(i: number, on: boolean): void {
+    const d = this.state;
+    if (i < 0 || i >= d.count) return;
+    d.lev[i] = on ? 1 : 0;
+    if (!on && d.floating[i] === 1) {
+      // 退出悬浮:改走空中段自然坠落(重新入水触发溅落)
+      d.floating[i] = 0;
+      d.vz[i] = 0;
+      d.d[i] = 0;
+    }
+  }
+
   /** 推进一颗(dt = 固定步长) */
   update(dt: number): void {
     const { params: p, field, state: d, grad } = this;
@@ -181,22 +241,64 @@ export class DropletSystem {
         continue;
       }
 
+      // ---------- 焦点悬浮(模块②意图):脱离水面耦合,z 逼近悬浮高度 ----------
+      if (d.lev[i] === 1) {
+        const surfL = field.totalHeight(x, y);
+        const zTarget = surfL + r + p.levitateHeight;
+        d.z[i] = d.z[i]! + (zTarget - d.z[i]!) * Math.min(1, dt * 6);
+        d.d[i] = 0.05 * r; // 近离水:静态核收缩,不注入 ΔV(免反馈)
+        d.vx[i] = d.vx[i]! * Math.exp(-4 * dt);
+        d.vy[i] = d.vy[i]! * Math.exp(-4 * dt);
+        d.x[i] = Math.min(Math.max(x + d.vx[i]! * dt, lo), hi);
+        d.y[i] = Math.min(Math.max(y + d.vy[i]! * dt, lo), hi);
+        continue;
+      }
+
       // ---------- 浮态段 ----------
-      // 1) 浸深弛豫:d → d*(一阶,τ_b,§4.2)(聚合冷却递减在 pairs.ts 统一做)
+      // 0) 悬停升力平滑(模块②):有效平衡浸深 = d*·(1 − hoverLift·lift)
+      //    → 液滴浮出水面;Δ浸深经既有耦合自动辐射波纹(乘 hoverRippleGain 增强)
+      const liftTarget = this.hovered === i ? 1 : 0;
+      d.lift[i] =
+        liftTarget + (d.lift[i]! - liftTarget) * Math.exp(-dt / p.hoverLiftTau);
+      const dStarEff = d.dStar[i]! * (1 - p.hoverLift * d.lift[i]!);
+      // 1) 浸深弛豫:d → d*_eff(一阶,τ_b,§4.2)(聚合冷却递减在 pairs.ts 统一做)
       const relax = dt / p.relaxTau;
       const dOld = d.d[i]!;
-      const dNew = dOld + (d.dStar[i]! - dOld) * (relax < 1 ? relax : 1);
+      const dNew = dOld + (dStarEff - dOld) * (relax < 1 ? relax : 1);
       const dDot = (dNew - dOld) / dt;
       // 2) Δ浸深 → 动态源:注入总量 = −depthRateGain·(dV/dd·ḋ)·dt(沉得更深→更凹)
       const dVdd = Math.PI * dOld * (2 * r - dOld);
+      const envGain = 1 + p.hoverRippleGain * d.lift[i]!; // 悬停液滴波纹增强(模块②)
       field.addVolumeSource(
         x,
         y,
         p.kernelSigma * r,
-        -p.depthRateGain * dVdd * dDot * dt,
+        -p.depthRateGain * envGain * dVdd * dDot * dt,
         p.couplingClamp,
       );
       d.d[i] = dNew;
+      // 2.7) 交互接管(模块②):拖拽中速度导向指针;释放后欠阻尼弹簧缓慢弹回
+      //      抓取位;接管期间跳过钉扎/坡度(手的主导性)。回弹到位 → 锚点迁至回弹位。
+      let skipEnv = false;
+      if (d.drag[i] === 1) {
+        d.vx[i] =
+          d.vx[i]! + ((this.dragTX - x) * p.dragFollow - p.dragDamp * d.vx[i]!) * dt;
+        d.vy[i] =
+          d.vy[i]! + ((this.dragTY - y) * p.dragFollow - p.dragDamp * d.vy[i]!) * dt;
+        skipEnv = true;
+      } else if (d.returning[i] === 1) {
+        const rdx = d.homeX[i]! - x;
+        const rdy = d.homeY[i]! - y;
+        d.vx[i] = d.vx[i]! + (p.returnK * rdx - p.returnC * d.vx[i]!) * dt;
+        d.vy[i] = d.vy[i]! + (p.returnK * rdy - p.returnC * d.vy[i]!) * dt;
+        if (Math.hypot(rdx, rdy) < 0.002 && Math.hypot(d.vx[i]!, d.vy[i]!) < 0.02) {
+          d.returning[i] = 0;
+          d.anchorX[i] = d.homeX[i]!;
+          d.anchorY[i] = d.homeY[i]!;
+        }
+        skipEnv = true;
+      }
+      if (!skipEnv) {
       // 2.5) 接触线钉扎恢复力(裁决 §12.2-C′,近似接触角滞后 pinning):
       //      离出生锚点超过 pinRadius 后,受线性弹簧回拉(临界阻尼增稳);
       //      pinRadius 内自由漂移(波浪推动不受限),锚点固定不漂移。
@@ -234,8 +336,9 @@ export class DropletSystem {
       const vy = d.vy[i]! + aSlope * grad[1]! * dt - aDrag * d.vy[i]! * dt;
       d.vx[i] = vx;
       d.vy[i] = vy;
-      d.x[i] = Math.min(Math.max(x + vx * dt, lo), hi);
-      d.y[i] = Math.min(Math.max(y + vy * dt, lo), hi);
+      } // skipEnv(交互接管时跳过坡度/钉扎;速度已由接管分支直接写入)
+      d.x[i] = Math.min(Math.max(x + d.vx[i]! * dt, lo), hi);
+      d.y[i] = Math.min(Math.max(y + d.vy[i]! * dt, lo), hi);
       // 5) 贴水:中心 = 总高 + (R − d)
       d.z[i] = field.totalHeight(d.x[i]!, d.y[i]!) + (r - dNew);
       // 6) 形状弹簧(§4.3 Deformation;碰撞/聚合踢振由 pairs.ts 注入 epsVel)

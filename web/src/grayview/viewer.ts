@@ -8,6 +8,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { WaterEngine } from "../watersim/engine";
+import { InteractionController, type SceneSnapshot } from "../interaction/controller";
 import { defaultParams, type WaterSimParams } from "../watersim/params";
 
 // 灰模色板(§6)
@@ -398,6 +399,103 @@ export function mountGrayViewer(
     wirePosAttr.needsUpdate = true;
   };
 
+  // ---- 交互系统接线(模块②适配层:DOM 指针 → 意图 → 引擎;相机/灰度表现) ----
+  const controller = new InteractionController();
+  const snap: SceneSnapshot = {
+    count: 0,
+    cx: new Float32Array(params.maxDroplets),
+    cy: new Float32Array(params.maxDroplets),
+    cr: new Float32Array(params.maxDroplets),
+  };
+  let pointerValid = false;
+  let pointerSX = 0;
+  let pointerSY = 0;
+  let pointerWorldX = 0;
+  let pointerWorldY = 0;
+  let pointerDown = false;
+  let justDown = false;
+  let focusGroup: number[] = [];
+  let focusMix = 0;
+  let savedCamPos: THREE.Vector3 | null = null;
+  let savedCamTgt: THREE.Vector3 | null = null;
+  let camAnim: {
+    t: number;
+    dur: number;
+    fromPos: THREE.Vector3;
+    toPos: THREE.Vector3;
+    fromTgt: THREE.Vector3;
+    toTgt: THREE.Vector3;
+  } | null = null;
+
+  const projV = new THREE.Vector3();
+  const halfFov = (camera.fov * Math.PI) / 360;
+
+  /** 指针射线与水面平面(世界 y=0)解析求交 → 引擎坐标(米) */
+  const pointerToWorld = (sx: number, sy: number): { x: number; y: number } | null => {
+    const ndcX = (sx / window.innerWidth) * 2 - 1;
+    const ndcY = -(sy / window.innerHeight) * 2 + 1;
+    projV.set(ndcX, ndcY, 0).unproject(camera);
+    const nx = projV.x, ny = projV.y, nz = projV.z;
+    projV.set(ndcX, ndcY, 1).unproject(camera);
+    let dx = projV.x - nx, dy = projV.y - ny, dz = projV.z - nz;
+    const l = Math.hypot(dx, dy, dz) || 1;
+    dx /= l; dy /= l; dz /= l;
+    if (Math.abs(dy) < 1e-6) return null;
+    const t = -ny / dy;
+    if (t < 0) return null;
+    return { x: nx + dx * t + half, y: nz + dz * t + half };
+  };
+
+  const dimSurface = new THREE.Color(0x3c3c3c);
+  const dimWire = new THREE.Color(0x242424);
+  const dimBg = new THREE.Color(0x8f8f8f);
+  const dimBridge = new THREE.Color(0x2e2e2e);
+  const baseSurface = new THREE.Color(COLOR_SURFACE);
+  const baseWire = new THREE.Color(COLOR_WIRE);
+  const baseBg = new THREE.Color(COLOR_BG);
+  const baseBridge = new THREE.Color(0x4a4a4a);
+  const surfaceMat = surface.material as THREE.MeshBasicMaterial;
+  const wireMat = wireMesh.material as THREE.LineBasicMaterial;
+  const bridgeMat = bridgeMesh.material as THREE.MeshBasicMaterial;
+
+  function startCamAnim(toPos: THREE.Vector3, toTgt: THREE.Vector3, dur: number): void {
+    camAnim = {
+      t: 0,
+      dur,
+      fromPos: camera.position.clone(),
+      toPos,
+      fromTgt: controls.target.clone(),
+      toTgt,
+    };
+    controls.enabled = false;
+  }
+
+  function applyFocusMix(frameDt: number): void {
+    const target = focusGroup.length > 0 ? 1 : 0;
+    focusMix += (target - focusMix) * Math.min(1, frameDt * 3);
+    surfaceMat.color.lerpColors(baseSurface, dimSurface, focusMix);
+    wireMat.color.lerpColors(baseWire, dimWire, focusMix);
+    bridgeMat.color.lerpColors(baseBridge, dimBridge, focusMix);
+    (scene.background as THREE.Color).lerpColors(baseBg, dimBg, focusMix);
+    // 液滴逐实例明暗:组内提亮,组外压暗(灰度,无彩色)
+    const d = engine.droplets.state;
+    for (let i = 0; i < d.count; i++) {
+      const inGroup = focusGroup.includes(i);
+      const f = inGroup ? 2.6 : 0.45;
+      const k = 1 + (f - 1) * focusMix;
+      colorScratch.setRGB(k, k, k);
+      dropletMesh.setColorAt(i, colorScratch);
+    }
+    if (dropletMesh.instanceColor) dropletMesh.instanceColor.needsUpdate = true;
+  }
+
+  const colorScratch = new THREE.Color();
+
+  function onResize2(): void {
+    /* 占位:resize 逻辑复用既有监听 */
+  }
+  void onResize2;
+
   // ---- HUD / 控制 ----
   let paused = false;
   let wireOn = true;
@@ -421,6 +519,10 @@ export function mountGrayViewer(
     engine = new WaterEngine(params);
     scheduleReset();
     hooks.reset?.(); // 宿主时间线状态同步复位(否则重播后演示不再触发)
+    controller.reset();
+    focusGroup = [];
+    engine.setWaterHover(false, 0, 0);
+    engine.setDropletHover(-1);
     bakeTotal();
     updateSurface();
     updateWire();
@@ -455,6 +557,37 @@ export function mountGrayViewer(
     engine.spawnDroplet(cx + (r2 + gap / 2), cy, z0 + r2, r2);
   });
 
+  // ---- 模块②指针适配(DOM → 采样;Esc = 焦点退出) ----
+  const dom = renderer.domElement;
+  dom.addEventListener("pointermove", (e) => {
+    pointerSX = e.clientX;
+    pointerSY = e.clientY;
+    pointerValid = true;
+  });
+  dom.addEventListener("pointerdown", (e) => {
+    pointerSX = e.clientX;
+    pointerSY = e.clientY;
+    pointerValid = true;
+    pointerDown = true;
+    justDown = true;
+  });
+  window.addEventListener("pointerup", () => {
+    pointerDown = false;
+  });
+  dom.addEventListener("pointerleave", () => {
+    pointerValid = false;
+    pointerDown = false;
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const intent = controller.escape();
+    if (intent && intent.kind === "focusExit") {
+      engine.exitFocus();
+      focusGroup = [];
+      if (savedCamPos && savedCamTgt) startCamAnim(savedCamPos, savedCamTgt, 0.6);
+    }
+  });
+
   window.addEventListener("resize", () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
@@ -476,16 +609,117 @@ export function mountGrayViewer(
   };
 
   const captionNode = document.getElementById("gray-caption");
-  const tick = (): void => {
+  const tick = (render: boolean): void => {
     const frameDt = Math.min(clock.getDelta(), 0.1);
     if (!paused) {
       if (!hooks.disablePokes) applyDuePokes();
+      // ---- 模块②:场景快照 → 控制器 → 意图 → 引擎 ----
+      const dstate = engine.droplets.state;
+      snap.count = dstate.count;
+      for (let i = 0; i < dstate.count; i++) {
+        projV.set(dstate.x[i]! - half, dstate.z[i]!, dstate.y[i]! - half);
+        const dist = camera.position.distanceTo(projV);
+        projV.project(camera);
+        snap.cx[i] = ((projV.x + 1) / 2) * window.innerWidth;
+        snap.cy[i] = ((1 - projV.y) / 2) * window.innerHeight;
+        snap.cr[i] = (dstate.r[i]! * (window.innerHeight * 0.5)) / (halfFov * dist + 1e-6);
+      }
+      const wHit = pointerValid ? pointerToWorld(pointerSX, pointerSY) : null;
+      if (wHit) {
+        pointerWorldX = wHit.x;
+        pointerWorldY = wHit.y;
+      }
+      const intents = controller.update(
+        snap,
+        {
+          sx: pointerSX,
+          sy: pointerSY,
+          valid: pointerValid && wHit !== null,
+          worldX: pointerWorldX,
+          worldY: pointerWorldY,
+          down: pointerDown,
+        },
+        engine.stats.simTime,
+        justDown,
+      );
+      justDown = false;
+      for (const it of intents) {
+        switch (it.kind) {
+          case "hoverWater":
+            engine.setWaterHover(true, it.x, it.y);
+            engine.setDropletHover(-1);
+            break;
+          case "hoverDroplet":
+            engine.setWaterHover(false, 0, 0);
+            engine.setDropletHover(it.index);
+            break;
+          case "dragStart":
+            engine.setWaterHover(false, 0, 0);
+            engine.beginDrag(it.index, it.x, it.y);
+            break;
+          case "dragMove":
+            engine.moveDrag(it.x, it.y);
+            break;
+          case "dragEnd":
+            engine.endDrag();
+            break;
+          case "focusEnter": {
+            engine.setWaterHover(false, 0, 0);
+            engine.setDropletHover(-1);
+            focusGroup = engine.enterFocus(it.index);
+            if (focusGroup.length > 0) {
+              savedCamPos = camera.position.clone();
+              savedCamTgt = controls.target.clone();
+              let cxs = 0;
+              let czs = 0;
+              for (const m of focusGroup) {
+                cxs += engine.droplets.state.x[m]!;
+                czs += engine.droplets.state.y[m]!;
+              }
+              const ccx = cxs / focusGroup.length - half;
+              const ccz = czs / focusGroup.length - half;
+              startCamAnim(
+                new THREE.Vector3(ccx, 0.95, ccz + 0.02),
+                new THREE.Vector3(ccx, 0, ccz),
+                0.6,
+              );
+            }
+            break;
+          }
+          case "focusExit":
+            engine.exitFocus();
+            focusGroup = [];
+            if (savedCamPos && savedCamTgt) {
+              startCamAnim(savedCamPos, savedCamTgt, 0.6);
+            }
+            break;
+        }
+      }
+      // 持续意图(相位驱动;事件只在校沿发,悬停态需逐帧供能)
+      if (controller.phase === "idle" && pointerValid) {
+        engine.setWaterHover(true, pointerWorldX, pointerWorldY);
+      } else if (controller.phase !== "idle") {
+        engine.setWaterHover(false, 0, 0);
+      }
+      if (controller.phase === "hover") {
+        engine.setDropletHover(controller.target);
+      } else {
+        engine.setDropletHover(-1);
+      }
       engine.advance(frameDt);
-      bakeTotal();
-      updateSurface();
-      updateWire();
-      syncDroplets();
-      syncBridges(frameDt);
+      // 相机缓动 + 灰度压暗/高亮
+      if (camAnim) {
+        camAnim.t += frameDt;
+        const k = Math.min(1, camAnim.t / camAnim.dur);
+        const ease = k * k * (3 - 2 * k);
+        camera.position.lerpVectors(camAnim.fromPos, camAnim.toPos, ease);
+        controls.target.lerpVectors(camAnim.fromTgt, camAnim.toTgt, ease);
+        if (k >= 1) {
+          camAnim = null;
+          controls.enabled = focusGroup.length === 0;
+        }
+      }
+      applyFocusMix(frameDt);
       hooks.tick?.(engine, frameDt);
     }
     if (captionNode) {
@@ -495,8 +729,15 @@ export function mountGrayViewer(
       captionNode.textContent = text ?? "";
       captionNode.style.display = text ? "block" : "none";
     }
-    controls.update();
-    renderer.render(scene, camera);
+    if (render) {
+      bakeTotal();
+      updateSurface();
+      updateWire();
+      syncDroplets();
+      syncBridges(frameDt);
+      controls.update();
+      renderer.render(scene, camera);
+    }
 
     fpsAcc += frameDt;
     fpsFrames++;
@@ -525,10 +766,44 @@ export function mountGrayViewer(
   renderer.domElement.addEventListener("webglcontextrestored", () => {
     hudError.style.display = "none";
     clock.getDelta(); // 丢弃停循环期间积压的时长,避免时间跳跃
-    renderer.setAnimationLoop(tick);
+    renderer.setAnimationLoop(() => tick(true));
   });
 
-  renderer.setAnimationLoop(tick);
+  renderer.setAnimationLoop(() => tick(true));
+
+  // 后台心跳(§4 运行时):rAF 在隐藏标签中暂停;隐藏时以 worker 拍子
+  // 只推进物理(渲染跳过),demo 时间线与灰模验收不因标签切换而冻结
+  const heartbeat = new Worker(new URL("./heartbeat.ts", import.meta.url), {
+    type: "module",
+  });
+  heartbeat.onmessage = () => {
+    if (document.hidden) tick(false);
+  };
+
+  // dev 探针:控制台可 (window as any).__gray.engine / .screenOf(i) 观测引擎态
+  (window as unknown as { __gray: object }).__gray = {
+    get engine() {
+      return engine;
+    },
+    get controller() {
+      return controller;
+    },
+    screenOf(i: number): [number, number, number] {
+      const d = engine.droplets.state;
+      const v = new THREE.Vector3(
+        d.x[i]! - half,
+        d.z[i]!,
+        d.y[i]! - half,
+      );
+      const dist = camera.position.distanceTo(v);
+      v.project(camera);
+      return [
+        ((v.x + 1) / 2) * window.innerWidth,
+        ((1 - v.y) / 2) * window.innerHeight,
+        (d.r[i]! * (window.innerHeight * 0.5)) / (halfFov * dist),
+      ];
+    },
+  };
 
   scheduleReset();
   bakeTotal();

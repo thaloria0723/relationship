@@ -69,6 +69,15 @@ export interface DropletState {
    */
   anchorX: Float32Array;
   anchorY: Float32Array;
+  /** 悬停升力系数 0..1(平滑;有效平衡浸深 = d*·(1−hoverLift·lift)) */
+  lift: Float32Array;
+  /** 拖拽回弹目标(抓取时位置) */
+  homeX: Float32Array;
+  homeY: Float32Array;
+  /** 交互标志:拖拽中 / 回弹中 / 焦点悬浮 */
+  drag: Uint8Array;
+  returning: Uint8Array;
+  lev: Uint8Array;
 }
 
 /** 液桥实体状态(紧凑数组 + count,交换删除) */

@@ -53,6 +53,13 @@ export class WaterEngine implements DropletHost {
   };
 
   private acc = 0;
+  // ---- 模块②意图状态 ----
+  private waterHoverValid = false;
+  private waterHoverX = 0;
+  private waterHoverY = 0;
+  private rippleAcc = 0;
+  private focusGroup: number[] = [];
+  private readonly bridgeScratch = new Int32Array(64);
   private readonly pendingImpulses: PendingImpulse[] = [];
   private readonly pendingSpawns: PendingSpawn[] = [];
   private readonly craters: CraterEmitter[];
@@ -160,6 +167,81 @@ export class WaterEngine implements DropletHost {
     }
   }
 
+  // ---- 模块②意图 API(交互系统注入;物理承接见 droplet.ts / 下方管线) ----
+
+  /** 特性①:指针悬停水面 → 周期性微弱涟漪源(valid=false 取消) */
+  setWaterHover(valid: boolean, x: number, y: number): void {
+    this.waterHoverValid = valid;
+    this.waterHoverX = x;
+    this.waterHoverY = y;
+  }
+
+  /** 特性②:悬停液滴 → 升力浮出水面 + 波纹增强(-1 取消) */
+  setDropletHover(i: number): void {
+    this.droplets.setHovered(i);
+  }
+
+  /** 特性③:抓取液滴拖拽(x,y 为水面目标点) */
+  beginDrag(i: number, x: number, y: number): void {
+    this.droplets.beginDrag(i, x, y);
+  }
+
+  moveDrag(x: number, y: number): void {
+    this.droplets.setDragTarget(x, y);
+  }
+
+  endDrag(): void {
+    this.droplets.endDrag();
+  }
+
+  /**
+   * 特性④:焦点模式。分组 G = {i} ∪ 直连桥邻居;G 内液滴悬浮,
+   * 跨组桥(guest 端在组外)临时切断。返回组成员(viewer 相机/高亮用)。
+   */
+  enterFocus(i: number): number[] {
+    const d = this.droplets.state;
+    if (i < 0 || i >= d.count) return [];
+    const group = [i];
+    const seen = new Set<number>([i]);
+    const scratch = this.bridgeScratch;
+    // BFS 一层:直连邻居(液桥 = 关系网的直接关系)
+    const nb = this.bridges.bridgesOf(i, scratch);
+    for (let k = 0; k < nb; k++) {
+      const bridgeIdx = scratch[k]!;
+      const other =
+        this.bridges.state.a[bridgeIdx] === i
+          ? this.bridges.state.b[bridgeIdx]!
+          : this.bridges.state.a[bridgeIdx]!;
+      if (!seen.has(other)) {
+        seen.add(other);
+        group.push(other);
+      }
+    }
+    this.focusGroup = group;
+    for (const m of group) this.droplets.setLevitate(m, true);
+    // 跨组桥切断(退出时恢复)
+    for (let k = 0; k < this.bridges.state.count; k++) {
+      const a = this.bridges.state.a[k]!;
+      const b = this.bridges.state.b[k]!;
+      const aIn = seen.has(a);
+      const bIn = seen.has(b);
+      if (aIn !== bIn) this.bridges.setCut(k, true);
+    }
+    return group.slice();
+  }
+
+  exitFocus(): void {
+    for (const m of this.focusGroup) this.droplets.setLevitate(m, false);
+    for (let k = 0; k < this.bridges.state.count; k++) {
+      this.bridges.setCut(k, false);
+    }
+    this.focusGroup = [];
+  }
+
+  getFocusGroup(): readonly number[] {
+    return this.focusGroup;
+  }
+
   /** 恰好执行一个固定步(确定性测试与单步调试用) */
   stepFixed(): void {
     // 1) 输入事件
@@ -173,6 +255,20 @@ export class WaterEngine implements DropletHost {
       this.droplets.spawn(p.x, p.y, p.z, p.r);
     }
     this.pendingSpawns.length = 0;
+    // 1.5) 模块②意图:悬停水面周期涟漪(确定性计时)
+    if (this.waterHoverValid) {
+      this.rippleAcc += this.params.dt;
+      if (this.rippleAcc >= this.params.ripplePeriod) {
+        this.rippleAcc -= this.params.ripplePeriod;
+        this.field.addVolumeSource(
+          this.waterHoverX,
+          this.waterHoverY,
+          0.015,
+          -this.params.rippleVolume,
+          this.params.couplingClamp,
+        );
+      }
+    }
     // 2) 液滴单体:空中积分 / 浮态力求解 + 动态源注入(§4.4)
     this.droplets.update(this.params.dt);
     // 2.2) 液滴间(M3):碰撞冲量+去穿透 → 毛细吸引 → 聚合判定与执行

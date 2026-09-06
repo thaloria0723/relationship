@@ -104,6 +104,28 @@ export type WaterSimParams = {
   /** 桥内流动系数(m²/s):Q = k·π·r_neck²·(1/r_a − 1/r_b),小滴 → 大滴 */
   bridgeFlowK: number;
 
+  // ---- 交互意图 API(任务②,2026-09-07;模块②意图的物理承接) ----
+  /** 悬停升力:有效平衡浸深 ×(1−hoverLift·lift) */
+  hoverLift: number;
+  /** 悬停升力平滑时间常数(秒) */
+  hoverLiftTau: number;
+  /** 拖拽跟随劲度(s⁻²,速度导向指针) */
+  dragFollow: number;
+  /** 拖拽跟随阻尼(s⁻¹;ζ = dragDamp/(2·√dragFollow) ≈ 0.63) */
+  dragDamp: number;
+  /** 释放回弹劲度(s⁻²,欠阻尼缓慢弹回,ζ ≈ 0.45) */
+  returnK: number;
+  /** 释放回弹阻尼(s⁻¹) */
+  returnC: number;
+  /** 悬停水面涟漪注入周期(秒) */
+  ripplePeriod: number;
+  /** 悬停水面涟漪单次注入体积(m³;σ=15mm 时峰深 ~0.3mm) */
+  rippleVolume: number;
+  /** 悬停液滴波纹增强倍率(叠加在 Δ浸深耦合上) */
+  hoverRippleGain: number;
+  /** 焦点悬浮高度(m,液滴中心离水面) */
+  levitateHeight: number;
+
   // ---- §5.5 耦合(M2 接入) ----
   /** 凹陷核宽度(×r,3σ 截断、归一化 ∫=−V_sub,范围 0.8–2) */
   kernelSigma: number;
@@ -180,6 +202,17 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   bridgeBreakStretch: 0.6,
   bridgeFlowK: 1.6e-5,
 
+  hoverLift: 0.55,
+  hoverLiftTau: 0.3,
+  dragFollow: 400,
+  dragDamp: 25,
+  returnK: 6,
+  returnC: 2.2,
+  ripplePeriod: 0.12,
+  rippleVolume: 2.5e-7,
+  hoverRippleGain: 6,
+  levitateHeight: 0.08,
+
   /** 凹陷核宽度(×r,3σ 截断;默认 0.8 为验收整改裁决 B:深陡可见,范围下限,§10 预案) */
   kernelSigma: 0.8,
   impulseGain: 1.0,
@@ -243,6 +276,16 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["bridgeTensionC", 0, 40],
   ["bridgeBreakStretch", 0.2, 2],
   ["bridgeFlowK", 0, 1e-3],
+  ["hoverLift", 0, 0.9],
+  ["hoverLiftTau", 0.05, 1],
+  ["dragFollow", 50, 2000],
+  ["dragDamp", 1, 100],
+  ["returnK", 1, 30],
+  ["returnC", 0.3, 10],
+  ["ripplePeriod", 0.03, 0.5],
+  ["rippleVolume", 0, 1e-5],
+  ["hoverRippleGain", 0, 20],
+  ["levitateHeight", 0.01, 0.3],
 ];
 
 /**
