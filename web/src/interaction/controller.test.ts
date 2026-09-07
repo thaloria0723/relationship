@@ -79,6 +79,44 @@ describe("interaction/controller 命中(解析圆)", () => {
     expect(far).toContainEqual({ kind: "hoverWater", x: 0.5, y: 0.5 });
     expect(c.phase).toBe("idle");
   });
+
+  it("悬停自运动补偿(第四批抖动根因):升力抬升使屏幕圆大幅上移(可远超固定滞后余量)不翻转;指针真正离开才退出", () => {
+    const c = new InteractionController();
+    // r=20 圆心(200,200),指针在圆心下方 30px(容差圆 34px 内、近边缘)
+    const single = {
+      count: 1,
+      cx: Float32Array.of(200),
+      cy: Float32Array.of(200),
+      cr: Float32Array.of(20),
+    };
+    c.update(single, ptr({ sx: 200, sy: 230 }), T0, false);
+    expect(c.phase).toBe("hover");
+    expect(c.target).toBe(0);
+    // 升力把圆心上移 40px:抬升幅度随缩放/液滴大小变化,可远超固定滞后余量
+    // (0.6×34≈20px)。固定滞后下此处退出→回落→再进入形成极限环(实测 8s 翻转
+    // 数百次,液滴剧烈上下弹跳);自运动补偿后必须全程保持悬停。
+    const lifted = {
+      count: 1,
+      cx: Float32Array.of(200),
+      cy: Float32Array.of(160),
+      cr: Float32Array.of(20),
+    };
+    for (let f = 0; f < 10; f++) {
+      const intents = c.update(
+        lifted,
+        ptr({ sx: 200, sy: 230 }),
+        T0 + 0.016 * (f + 1),
+        false,
+      );
+      expect(intents).toHaveLength(0);
+      expect(c.phase).toBe("hover");
+      expect(c.target).toBe(0);
+    }
+    // 指针继续远离(超出 滞后圆 + 自运动量 = 1.6×34 + 40 ≈ 94px)→ 正常退出
+    const gone = c.update(lifted, ptr({ sx: 200, sy: 265 }), T0 + 0.3, false);
+    expect(gone).toContainEqual({ kind: "hoverWater", x: 0.5, y: 0.5 });
+    expect(c.phase).toBe("idle");
+  });
 });
 
 describe("interaction/controller 拖拽", () => {

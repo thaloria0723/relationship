@@ -296,7 +296,7 @@ export class WaterEngine implements DropletHost {
     this.droplets.update(this.params.dt);
     // 2.2) 液滴间(M3):碰撞冲量+去穿透 → 毛细吸引 → 聚合判定与执行
     this.pairs.step(this.params.dt);
-    // 2.4) 液桥(任务①):成桥扫描 + 张力/流动/侵入治理(网络模式)
+    // 2.4) 液桥(任务①):成桥扫描 + 张力/侵入治理(网络模式;无体积流动,第四批)
     this.bridges.step(this.params.dt);
     // 2.5) 弹坑发射器(入水/聚合冲击分步展开,§4.4 输入事件层)
     this.advanceCraters();

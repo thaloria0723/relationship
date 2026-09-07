@@ -252,32 +252,23 @@ describe("watersim/bridges 液桥力学", () => {
   });
 });
 
-describe("watersim/bridges 液桥流动", () => {
-  it("体积从小滴流向大滴(Laplace 压差),总体积守恒", () => {
+describe("watersim/bridges 液滴大小恒定(第四批:项目要求落滴后大小不再变化)", () => {
+  it("成桥后长时间推进:双滴半径与平衡浸深严格不变(拉普拉斯流动已移除)", () => {
     const { drops, bridges } = makeSys();
     spawnPair(drops, 0.015, 0.028, 0.004);
     floatPair(drops);
     for (let s = 0; s < 40; s++) bridges.step(DT);
     expect(bridges.state.count).toBe(1);
     const d = drops.state;
-    const v0 =
-      (4 / 3) * Math.PI * (d.r[0]! ** 3 + d.r[1]! ** 3);
-    for (let s = 0; s < Math.round(20 / DT); s++) bridges.step(DT);
-    const v1 =
-      (4 / 3) * Math.PI * (d.r[0]! ** 3 + d.r[1]! ** 3);
-    expect(d.r[1]!).toBeGreaterThan(0.028); // 大滴更大(小→大流动)
-    // 体积守恒:构造上守恒,断言容忍 Float32 半径存储的累计舍入(<0.1%)
-    expect(Math.abs(v1 - v0) / v0).toBeLessThan(0.001);
-    // 慢流动:20s 内不得把小滴抽干(风格化慢速率)
-    expect(d.r[0]!).toBeGreaterThan(0.01);
-  });
-
-  it("流量记号供渲染粒子取用(方向:小→大)", () => {
-    const { drops, bridges } = makeSys();
-    spawnPair(drops, 0.015, 0.028, 0.004);
-    floatPair(drops);
-    for (let s = 0; s < 40; s++) bridges.step(DT);
-    expect(bridges.flowRate[0]!).toBeGreaterThan(0); // a(小)→ b(大)
+    const r0 = d.r[0]!;
+    const r1 = d.r[1]!;
+    const ds0 = d.dStar[0]!;
+    const ds1 = d.dStar[1]!;
+    for (let s = 0; s < Math.round(60 / DT); s++) bridges.step(DT);
+    expect(d.r[0]!).toBe(r0); // 小滴不再被抽干
+    expect(d.r[1]!).toBe(r1); // 大滴不再持续增大
+    expect(d.dStar[0]!).toBe(ds0);
+    expect(d.dStar[1]!).toBe(ds1);
   });
 });
 

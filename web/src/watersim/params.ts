@@ -112,8 +112,6 @@ export type WaterSimParams = {
   bridgeTensionK: number;
   /** 桥张力轴向阻尼(N·s/m) */
   bridgeTensionC: number;
-  /** 桥内流动系数(m²/s):Q = k·π·r_neck²·(1/r_a − 1/r_b),小滴 → 大滴 */
-  bridgeFlowK: number;
   /** 成桥持距下限间隙(×(r₁+r₂)):restLen = max(成桥距, rSum·(1+此值))。
    *  连接语义(调优第三批①修订,委托方裁决:液桥=关系的边,重点是连接而非毛细作用):
    *  - 成桥距离无关:任意两漂浮滴都能成桥,远距对保持当前距离(连接而非收缩);
@@ -125,6 +123,10 @@ export type WaterSimParams = {
   hoverLift: number;
   /** 悬停升力平滑时间常数(秒) */
   hoverLiftTau: number;
+  /** 浮态贴水一阶随动时间常数(秒,0=逐帧硬贴水;调优第四批):硬贴水会让液滴
+   *  逐帧跟随自身悬停涟漪泵与入水高频纹波(~9Hz、±1.3mm)→ 快速颤动;
+   *  一阶低通只削高频,慢速升力浮出与波浪 riding 不受影响 */
+  zFollowTau: number;
   /** 拖拽跟随劲度(s⁻²,速度导向指针) */
   dragFollow: number;
   /** 拖拽跟随阻尼(s⁻¹;ζ = dragDamp/(2·√dragFollow) ≈ 0.63) */
@@ -224,12 +226,13 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
    *  被拖端可自由拉伸、牵连端只被轻微拽动 */
   bridgeTensionK: 4,
   bridgeTensionC: 1,
-  bridgeFlowK: 1.6e-5,
   /** 净间距 = 1.0·rSum(液滴半径同量级的清晰间隔;「液滴间距过小」的根治) */
   bridgeRestGap: 1.0,
 
   hoverLift: 0.78,
   hoverLiftTau: 0.3,
+  /** 调优第四批:贴水随动 100ms(抑高频颤动;升力 τ=0.3s 与慢波 riding 不受影响) */
+  zFollowTau: 0.1,
   dragFollow: 400,
   dragDamp: 25,
   returnK: 6,
@@ -303,10 +306,10 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["initialFloaters", 0, 16],
   ["bridgeTensionK", 0, 200],
   ["bridgeTensionC", 0, 40],
-  ["bridgeFlowK", 0, 1e-3],
   ["bridgeRestGap", 0.05, 2],
   ["hoverLift", 0, 0.9],
   ["hoverLiftTau", 0.05, 1],
+  ["zFollowTau", 0, 0.5],
   ["dragFollow", 50, 2000],
   ["dragDamp", 1, 100],
   ["returnK", 1, 30],

@@ -240,21 +240,28 @@ describe("watersim/engine 拖拽分层阻力(第三批②:被控端自由/牵连
   });
 });
 
-describe("watersim/engine 悬停稳定(第三批②:悬浮液滴不异常抖动)", () => {
-  it("持续悬停:升力稳定浮出,稳态 z 波动 ≤2mm", () => {
+describe("watersim/engine 悬停稳定(第三批②引入;第四批收紧:贴水随动抑颤)", () => {
+  it("持续悬停:升力稳定浮出(浮出量保留),稳态 z 高频颤动受贴水随动抑制(≤0.8mm)", () => {
     const engine = new WaterEngine(defaultParams);
     spawnFloating(engine.droplets, 0.5, 0.5, 0.02);
+    for (let s = 0; s < Math.round(0.5 / DT); s++) engine.stepFixed();
+    const zBase = engine.droplets.state.z[0]!;
     engine.setDropletHover(0);
-    for (let s = 0; s < Math.round(1.0 / DT); s++) engine.stepFixed();
+    // 升力×耦合隆起的全程抬升约 2.5s 收敛(慢瞬态非颤动);取收敛后 2s 窗口量颤动
+    for (let s = 0; s < Math.round(3.0 / DT); s++) engine.stepFixed();
     let zMin = Infinity;
     let zMax = -Infinity;
-    for (let s = 0; s < Math.round(3.0 / DT); s++) {
+    for (let s = 0; s < Math.round(2.0 / DT); s++) {
       engine.stepFixed();
       const z = engine.droplets.state.z[0]!;
       zMin = Math.min(zMin, z);
       zMax = Math.max(zMax, z);
     }
-    expect(zMax - zMin).toBeLessThan(0.002);
+    // 浮出水面可见(特性②升力保留:0.78·d* ≈ 13mm,叠加悬停波纹隆起)
+    expect(zMax - zBase).toBeGreaterThan(0.008);
+    // 硬贴水时悬停涟漪泵(每 0.108s 一次 ~1.3mm 凹陷)使 z 以 ~9Hz 颤动
+    // (稳态 p-p 实测 ~1.3mm);贴水随动(zFollowTau=0.1s)低通后 ≤0.8mm
+    expect(zMax - zMin).toBeLessThan(0.0008);
   });
 });
 

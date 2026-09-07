@@ -5,8 +5,9 @@
 //   成桥距离无关——任意两颗漂浮滴持续 drainTime 即成桥,远距对保持当前距离
 //   (restLen=成桥距,连接而非收缩),靠得过近的对被推开到持距下限(最小净间距)。
 // 物理:张力弹簧(常态双侧持距;拖拽期单侧——被拖端零阻力,牵连端被轻微拽动;
-//       拉伸不断裂:距离变化由 rebaseRestLengths 吸收为新常态,第三批②修订)
-// + 拉普拉斯压差流动(小滴 → 大滴,体积守恒)
+//       拉伸不断裂:距离变化由 rebaseRestLengths 吸收为新常态,第三批②修订)。
+//   拉普拉斯压差流动已移除(调优第四批,委托方要求:液滴落下后大小不再变化——
+//   原压差流动使大滴持续吸附小滴直至抽干,与该要求冲突;桥只连接不搬运体积)。
 // + 侵入治理(「液桥穿过第三方液滴」;断桥的唯一途径):
 //   a) 生成前胶囊排斥:桥轴线段被第三方液滴占据(膨胀 5%)→ 拒绝成桥;
 //   b) 生存期 0.2s 复检:侵入持续 > grace → 断桥,双端进冷却防抖
@@ -15,7 +16,6 @@
 // 确定性:预分配池、固定顺序扫描、无对象分配热路径。
 // ============================================================
 
-import { solveEquilibriumDepth } from "./field";
 import type { DropletSystem } from "./droplet";
 import type { WaterSimParams } from "./params";
 import type { BridgeState } from "./types";
@@ -25,8 +25,6 @@ const INTRUDE_GRACE = 0.2;
 
 export class BridgeSystem {
   readonly state: BridgeState;
-  /** 每桥体积流量(m³/s,>0 表示 a(小滴)→ b(大滴);渲染流动粒子取用) */
-  readonly flowRate: Float32Array;
   /** 累计成桥/断桥次数(测试与 HUD 观测) */
   formedCount = 0;
   brokenCount = 0;
@@ -51,14 +49,13 @@ export class BridgeSystem {
       cut: new Uint8Array(slots),
       intrudeT: new Float32Array(slots),
     };
-    this.flowRate = new Float32Array(slots);
     this.pending = new Float32Array(n * n);
   }
 
   /**
    * 推进一步(dt = 固定步长):
    * 1) 成桥扫描(mergeEnabled=false 的网络模式;聚合模式下 drainTime 归聚合独占)
-   * 2) 生存期:张力持距 / 超限断桥 / 拉普拉斯流动 / 侵入复检
+   * 2) 生存期:张力持距 / 侵入复检(无体积流动,第四批)
    */
   step(dt: number): void {
     if (!this.params.mergeEnabled) {
@@ -112,7 +109,6 @@ export class BridgeSystem {
     s.restLen[k] = dist > rest ? dist : rest;
     s.cut[k] = 0;
     s.intrudeT[k] = 0;
-    this.flowRate[k] = 0;
     s.count++;
     this.pending[i * this.maxN + j] = 0;
     this.formedCount++;
@@ -129,7 +125,6 @@ export class BridgeSystem {
       s.restLen[k] = s.restLen[last]!;
       s.cut[k] = s.cut[last]!;
       s.intrudeT[k] = s.intrudeT[last]!;
-      this.flowRate[k] = this.flowRate[last]!;
     }
     s.count--;
     this.brokenCount++;
@@ -138,7 +133,7 @@ export class BridgeSystem {
     this.pending[i * this.maxN + j] = 0;
   }
 
-  /** 生存期:张力持距 + 拉普拉斯流动 + 侵入复检(拉伸不断裂,第三批②修订) */
+  /** 生存期:张力持距 + 侵入复检(拉伸不断裂,第三批②修订;无体积流动,第四批) */
   private stepActive(dt: number): void {
     const d = this.drops.state;
     const p = this.params;
@@ -185,17 +180,6 @@ export class BridgeSystem {
           d.vx[j] = d.vx[j]! - (jImp / mb) * nx;
           d.vy[j] = d.vy[j]! - (jImp / mb) * ny;
         }
-        // 拉普拉斯流动:Q = k·π·r_neck²·(1/r_a − 1/r_b);Q>0 ⇒ a(小)→ b(大)
-        const ra = d.r[i]!;
-        const rb = d.r[j]!;
-        const rNeck = 0.45 * Math.min(ra, rb);
-        const q = p.bridgeFlowK * Math.PI * rNeck * rNeck * (1 / ra - 1 / rb);
-        this.flowRate[k] = q;
-        if (q !== 0) {
-          const vMin = (4 / 3) * Math.PI * Math.min(ra, rb) ** 3;
-          const dv = Math.min(Math.abs(q) * dt, 0.02 * vMin); // 单步钳幅 2% 小滴体积
-          this.transfer(i, j, q > 0 ? dv : -dv);
-        }
       }
       // 侵入复检:第三方占据桥轴,持续 > grace → 断桥(唯一的断桥途径)
       if (this.capsuleIntruded(i, j, dist) >= 0) {
@@ -231,21 +215,6 @@ export class BridgeSystem {
     const dvn = vnNew - vn;
     d.vx[m] = d.vx[m]! + dvn * nx;
     d.vy[m] = d.vy[m]! + dvn * ny;
-  }
-
-  /** 桥内体积转移(守恒):from → to 为正;更新半径与平衡浸深(d* 只依赖 r) */
-  private transfer(from: number, to: number, dv: number): void {
-    const d = this.drops.state;
-    const p = this.params;
-    const vFrom = (4 / 3) * Math.PI * d.r[from]! ** 3 - dv;
-    const vTo = (4 / 3) * Math.PI * d.r[to]! ** 3 + dv;
-    const rFrom = Math.cbrt((3 * vFrom) / (4 * Math.PI));
-    const rTo = Math.cbrt((3 * vTo) / (4 * Math.PI));
-    if (!(rFrom > 0.002) || !(rTo > 0.002)) return; // 病态防护
-    d.r[from] = rFrom;
-    d.r[to] = rTo;
-    d.dStar[from] = solveEquilibriumDepth(rFrom, p.densityRatio);
-    d.dStar[to] = solveEquilibriumDepth(rTo, p.densityRatio);
   }
 
   private mass(i: number): number {
@@ -345,9 +314,8 @@ export class BridgeSystem {
     }
   }
 
-  /** 焦点模式:切断/恢复指定桥(cut = 张力关 + 不渲染 + 流量清零) */
+  /** 焦点模式:切断/恢复指定桥(cut = 张力关 + 不渲染) */
   setCut(k: number, cut: boolean): void {
     this.state.cut[k] = cut ? 1 : 0;
-    if (cut) this.flowRate[k] = 0;
   }
 }

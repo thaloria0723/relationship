@@ -405,8 +405,16 @@ export class DropletSystem {
           }
         }
       }
-      // 5) 贴水:中心 = 总高 + (R − d)
-      d.z[i] = field.totalHeight(d.x[i]!, d.y[i]!) + (r - dNew);
+      // 5) 贴水(第四批修订:一阶随动):中心朝「总高 + (R − d)」弛豫而非逐帧
+      //    硬贴。硬贴会让液滴逐帧跟随自身悬停涟漪泵与入水高频纹波(~9Hz、
+      //    ±1.3mm)→ 快速颤动;zFollowTau 一阶低通只削高频,慢速升力浮出
+      //    (τ=0.3s)与波浪 riding 不受影响;zFollowTau=0 退回逐帧硬贴。
+      const zTarget = field.totalHeight(d.x[i]!, d.y[i]!) + (r - dNew);
+      d.z[i] =
+        p.zFollowTau > 0
+          ? d.z[i]! +
+            (zTarget - d.z[i]!) * (1 - Math.exp(-dt / p.zFollowTau))
+          : zTarget;
       // 6) 形状弹簧(§4.3 Deformation;碰撞/聚合踢振由 pairs.ts 注入 epsVel)
       this.stepShapeSpring(i, dt);
     }

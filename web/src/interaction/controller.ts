@@ -40,8 +40,12 @@ const DOUBLE_CLICK_DT = 0.35;
 const DOUBLE_CLICK_DXY = 14;
 /** 命中拾取的屏幕容差(px) */
 const GRAB_TOLERANCE = 14;
-/** 悬停退出滞后(×容差圆):悬停中的液滴被升力抬升/波纹顶起时屏幕圆会移动
- *  数像素,若退出沿用进入容差会帧率级翻转悬停态 → 升力抖动(第三批 #2 抖动根因) */
+/** 悬停退出滞后(×容差圆):悬停中的液滴被升力抬升/波纹顶起时屏幕圆会移动,
+ *  若退出沿用进入容差会帧率级翻转悬停态 → 升力抖动(第三批 #2 抖动根因)。
+ *  第四批修订:固定倍率不够——抬升的像素幅度随缩放/液滴大小变化(默认视距下
+ *  16–43px),指针在圆缘下方时会进入「抬升→出带退出→回落→再进入」的极限环
+ *  (实测 8s 翻转数百次,液滴剧烈弹跳)。故退出带再叠加「悬停期间圆心自位移量」
+ *  (hoverEntry 记录,见 update),使退出阈值始终覆盖液滴自身运动。 */
 const HOVER_EXIT_EXPAND = 1.6;
 /** 焦点转场冻结时长(秒,§6 转场期冻结输入) */
 export const FOCUS_FREEZE = 0.6;
@@ -58,6 +62,9 @@ export class InteractionController {
   target = -1;
   /** 焦点转场剩余冻结时间(秒) */
   freezeLeft = 0;
+  /** 进入悬停时的目标屏幕圆心(px):退出带按 |当前圆心 − 此处| 自运动扩张 */
+  private hoverEntryX = 0;
+  private hoverEntryY = 0;
 
   private lastDownT = -10;
   private lastDownX = 0;
@@ -129,6 +136,11 @@ export class InteractionController {
       if (!pointer.down) {
         this.phase = "hover";
         this.target = hit;
+        // 松手即悬停:以松手帧圆心为自运动基准(与下方悬停进入同款记录)
+        if (hit >= 0) {
+          this.hoverEntryX = snapshot.cx[hit]!;
+          this.hoverEntryY = snapshot.cy[hit]!;
+        }
         intents.push({ kind: "dragEnd" });
       }
       return intents;
@@ -150,7 +162,9 @@ export class InteractionController {
     // ---- 悬停 ----
     if (pointer.valid) {
       // 滞后保持:已在悬停且指针仍在该滴的扩张圆内 → 维持目标不重判
-      // (升力抬升/波纹顶起都会移动屏幕圆,无滞后会帧率级翻转悬停态)
+      // (升力抬升/波纹顶起都会移动屏幕圆,无滞后会帧率级翻转悬停态)。
+      // 退出带叠加悬停期圆心自位移(第四批):液滴被自己的升力抬走多少,
+      // 退出带就扩多少——「指针不动、液滴自己动」不再造成退出-再进入极限环。
       const held =
         this.phase === "hover" &&
         this.target >= 0 &&
@@ -159,7 +173,11 @@ export class InteractionController {
           snapshot.cx[this.target]! - pointer.sx,
           snapshot.cy[this.target]! - pointer.sy,
         ) <=
-          (snapshot.cr[this.target]! + GRAB_TOLERANCE) * HOVER_EXIT_EXPAND;
+          (snapshot.cr[this.target]! + GRAB_TOLERANCE) * HOVER_EXIT_EXPAND +
+            Math.hypot(
+              snapshot.cx[this.target]! - this.hoverEntryX,
+              snapshot.cy[this.target]! - this.hoverEntryY,
+            );
       const picked = held
         ? this.target
         : this.pick(snapshot, pointer.sx, pointer.sy);
@@ -167,6 +185,8 @@ export class InteractionController {
         if (this.phase !== "hover" || this.target !== picked) {
           this.phase = "hover";
           this.target = picked;
+          this.hoverEntryX = snapshot.cx[picked]!;
+          this.hoverEntryY = snapshot.cy[picked]!;
           intents.push({ kind: "hoverDroplet", index: picked });
         }
       } else {

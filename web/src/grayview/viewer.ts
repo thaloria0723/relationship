@@ -212,7 +212,7 @@ export function mountGrayViewer(
     dropletMesh.instanceMatrix.needsUpdate = true;
   };
 
-  // ---- 液桥渲染(任务①):颈状管(两端略宽、中间收窄;表面到表面跨距)+ 桥内流动粒子 ----
+  // ---- 液桥渲染(任务①):颈状管(两端略宽、中间收窄;表面到表面跨距) ----
   const BRIDGE_LEN = 10; // 轴向环数
   const BRIDGE_RAD = 8; // 周向边数
   // 桥池 = 完全图边数(连接语义:任意两漂浮滴都可成桥;须与 BridgeSystem 容量一致)
@@ -245,36 +245,18 @@ export function mountGrayViewer(
   bridgeMesh.frustumCulled = false;
   scene.add(bridgeMesh);
 
-  // 流动粒子:每桥 3 颗,沿桥轴迁移(方向 = 体积流量方向;速度风格化)
-  const FLOW_PER_BRIDGE = 3;
-  const flowT = new Float32Array(bridgeMax * FLOW_PER_BRIDGE);
-  const flowGeo = new THREE.BufferGeometry();
-  const flowPos = new Float32Array(bridgeMax * FLOW_PER_BRIDGE * 3);
-  const flowPosAttr = new THREE.BufferAttribute(flowPos, 3);
-  flowPosAttr.setUsage(THREE.DynamicDrawUsage);
-  flowGeo.setAttribute("position", flowPosAttr);
-  const flowPoints = new THREE.Points(
-    flowGeo,
-    new THREE.PointsMaterial({ color: 0x808080, size: 2, sizeAttenuation: false }),
-  );
-  flowPoints.frustumCulled = false;
-  scene.add(flowPoints);
-
-  const syncBridges = (dt: number): void => {
+  const syncBridges = (): void => {
     const bs = engine.bridges.state;
     const d = engine.droplets.state;
     for (let k = 0; k < bridgeMax; k++) {
       const base = k * vertsPerBridge;
       const active = k < bs.count && bs.cut[k] === 0;
       if (!active) {
-        // 收缩到原点(不可见)并隐藏该桥粒子
+        // 收缩到原点(不可见)
         for (let v = 0; v < vertsPerBridge; v++) {
           bridgePos[(base + v) * 3] = 0;
           bridgePos[(base + v) * 3 + 1] = 0;
           bridgePos[(base + v) * 3 + 2] = 0;
-        }
-        for (let f = 0; f < FLOW_PER_BRIDGE; f++) {
-          flowPos[(k * FLOW_PER_BRIDGE + f) * 3 + 1] = -10;
         }
         continue;
       }
@@ -351,22 +333,8 @@ export function mountGrayViewer(
           bridgePos[vi + 2] = cz + n1z * ox + n2z * oy;
         }
       }
-      // 流动粒子推进(方向随流量符号;速度风格化固定;沿桥可见段迁移)
-      const q = engine.bridges.flowRate[k]!;
-      for (let f = 0; f < FLOW_PER_BRIDGE; f++) {
-        const fi = k * FLOW_PER_BRIDGE + f;
-        if (q !== 0) {
-          flowT[fi] = (flowT[fi]! + (q > 0 ? 1 : -1) * 0.25 * dt + 1) % 1;
-        }
-        const ft = flowT[fi]!;
-        const vi = fi * 3;
-        flowPos[vi] = pax + (pbx - pax) * ft;
-        flowPos[vi + 1] = pay + (pby - pay) * ft;
-        flowPos[vi + 2] = paz + (pbz - paz) * ft;
-      }
     }
     bridgePosAttr.needsUpdate = true;
-    flowPosAttr.needsUpdate = true;
   };
 
   const syncWireVisibility = (): void => {
@@ -536,7 +504,7 @@ export function mountGrayViewer(
     updateSurface();
     updateWire();
     syncDroplets();
-    syncBridges(0);
+    syncBridges();
   });
   btnReset.addEventListener("click", () => {
     engine = new WaterEngine(params);
@@ -568,7 +536,8 @@ export function mountGrayViewer(
     );
   });
   // 落桥对:两颗半径不等的液滴近距落下 → drainTime 后成桥;持距下限把两滴推开到
-  // 清晰净间距(桥颈可见),半径差驱动拉普拉斯流动(小→大),供液桥与流动粒子验收
+  // 清晰净间距(桥颈可见),供液桥连接与「大小滴并存、尺寸恒定」验收(第四批:
+  // 拉普拉斯流动已移除,大滴不再吸附小滴)
   btnPair.addEventListener("click", () => {
     const cx = 0.35 + rng() * 0.3;
     const cy = 0.35 + rng() * 0.3;
@@ -776,7 +745,7 @@ export function mountGrayViewer(
       updateSurface();
       updateWire();
       syncDroplets();
-      syncBridges(frameDt);
+      syncBridges();
       renderer.render(scene, camera);
     }
 
@@ -862,7 +831,7 @@ export function mountGrayViewer(
   updateSurface();
   updateWire();
   syncDroplets();
-  syncBridges(0);
+  syncBridges();
   updateHud();
 }
 
