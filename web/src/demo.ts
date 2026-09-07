@@ -2,8 +2,9 @@
 // 演示时间线(物理模型实施文档 §7 验收脚本 + §12.2 参数裁决):把「应看到」逐条演出来。
 // 驱动:viewer 每帧 tick(engine) → 按 simTime 触发队列事件 + 持续源;
 // 字幕 caption(simTime) 标注当前验收点。
-// 初始近距对(间距 0.1m)在减弱的毛细吸引下缓慢靠拢 → 液桥连接
-// (mergeEnabled=false 默认:互不融合,稳定化液滴网络);落雨期钉扎固定。
+// 液桥连接语义(调优第三批①修订):成桥距离无关——任意两漂浮滴 drainTime 后
+// 即成桥(mergeEnabled=false:互不融合),远距对保持间距、近距对被推开来
+// 最小净间距;落雨期钉扎固定。
 // ============================================================
 
 import type { WaterEngine } from "./watersim/engine";
@@ -35,7 +36,7 @@ const events: TimelineEvent[] = [
   {
     t: 0,
     label:
-      "静水 + 3 颗漂浮滴(中央两滴近距):观察液滴下方凹陷(Distortion)与浸深(Buoyancy)",
+      "静水 + 3 颗漂浮滴:任意两滴经 drainTime 后自动成桥(连接距离无关);观察凹陷(Distortion)与浸深(Buoyancy)",
     captionUntil: 3.5,
     run: (e) => {
       spawnFloaterAtRest(e, 0.45, 0.5, 0.02);
@@ -45,21 +46,24 @@ const events: TimelineEvent[] = [
   },
   {
     t: 3.5,
-    label: "滴 A 自 0.15m 落于场中心:加速下落(Gravity)→ 入水环纹扩散(Ripple)",
+    label:
+      "滴 A 自 0.15m 落下:加速下落(Gravity)→ 入水环纹扩散(Ripple)→ 落定后即与全网成桥(连接)",
     captionUntil: 6.5,
     run: (e) => {
       const r = 0.02;
+      // 落点避开中央对的桥轴(侵入治理会剪断被穿过的桥);偏上方落下仍居场中
       e.spawnDroplet(
         0.5,
-        0.5,
-        e.field.totalHeight(0.5, 0.5) + p.dropHeight + r,
+        0.64,
+        e.field.totalHeight(0.5, 0.64) + p.dropHeight + r,
         r,
       );
     },
   },
   {
     t: 6.0,
-    label: "左缘波源启动:等距波列横穿全场(Wave);液滴随波漂移(Flow / 坡度力)",
+    label:
+      "左缘波源启动:等距波列横穿全场(Wave);液滴随波微晃、保持在落点附近(坡度力 + 钉扎回位)",
     captionUntil: 9.5,
     run: () => {
       waveSourceOn = true;
@@ -68,7 +72,7 @@ const events: TimelineEvent[] = [
   {
     t: 9.5,
     label:
-      "近距两滴互相靠拢(Surface tension)→ 液桥连接:稳定化液滴网络,靠拢但不融合(§12.2-C′)",
+      "液桥网络:桥持最小净间距(靠太近被推开)、两端略宽中间收窄;相连但不融合(§12.2-C′)",
     captionUntil: 13.0,
     run: () => {},
   },

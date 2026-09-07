@@ -53,6 +53,32 @@ describe("interaction/controller 命中(解析圆)", () => {
     const i = c.update(snap(), ptr({ valid: false }), T0, false);
     expect(i).toHaveLength(0);
   });
+
+  it("悬停滞后(第三批 #2 抖动根因):悬停中液滴屏幕圆小幅移动(升力抬升)不翻转悬停态;远离才退出", () => {
+    const c = new InteractionController();
+    // 指针在滴 0 圆心下方 0.8r(容差圆内近边缘——升力抬升后最易失命中的位置)
+    const edge = ptr({ sx: 200, sy: 200 + 40 * 0.8 });
+    c.update(snap(), edge, T0, false);
+    expect(c.phase).toBe("hover");
+    expect(c.target).toBe(0);
+    // 升力把滴 0 抬升:屏幕圆上移 6px(r=40 → 仍在 1.6×扩张圆内)→ 悬停保持,无翻转
+    const lifted = {
+      count: 2,
+      cx: Float32Array.of(200, 260),
+      cy: Float32Array.of(194, 200),
+      cr: Float32Array.of(40, 20),
+    };
+    for (let f = 0; f < 10; f++) {
+      const intents = c.update(lifted, edge, T0 + 0.016 * (f + 1), false);
+      expect(intents).toHaveLength(0); // 无 hoverWater/hoverDroplet 翻转
+      expect(c.phase).toBe("hover");
+      expect(c.target).toBe(0);
+    }
+    // 指针远离(超出扩张圆)→ 退出悬停回 idle
+    const far = c.update(lifted, ptr({ sx: 320, sy: 200 }), T0 + 0.2, false);
+    expect(far).toContainEqual({ kind: "hoverWater", x: 0.5, y: 0.5 });
+    expect(c.phase).toBe("idle");
+  });
 });
 
 describe("interaction/controller 拖拽", () => {

@@ -212,10 +212,11 @@ export function mountGrayViewer(
     dropletMesh.instanceMatrix.needsUpdate = true;
   };
 
-  // ---- 液桥渲染(任务①):颈状管(两端宽、中间窄)+ 桥内流动粒子 ----
+  // ---- 液桥渲染(任务①):颈状管(两端略宽、中间收窄;表面到表面跨距)+ 桥内流动粒子 ----
   const BRIDGE_LEN = 10; // 轴向环数
   const BRIDGE_RAD = 8; // 周向边数
-  const bridgeMax = params.maxDroplets;
+  // 桥池 = 完全图边数(连接语义:任意两漂浮滴都可成桥;须与 BridgeSystem 容量一致)
+  const bridgeMax = (params.maxDroplets * (params.maxDroplets - 1)) / 2;
   const vertsPerBridge = (BRIDGE_LEN + 1) * BRIDGE_RAD;
   const bridgeGeo = new THREE.BufferGeometry();
   const bridgePos = new Float32Array(bridgeMax * vertsPerBridge * 3);
@@ -311,14 +312,35 @@ export function mountGrayViewer(
       const n2x = uy * n1z - uz * n1y;
       const n2y = uz * n1x - ux * n1z;
       const n2z = ux * n1y - uy * n1x;
-      const rEnd = 1.0 * Math.min(d.r[ia]!, d.r[ib]!);
-      const rNeck = 0.62 * rEnd;
+      // 桥管形(第三批②再收窄:委托方反馈「依旧过宽,尤其两端」):
+      // - 跨距表面到表面:两端各内嵌 0.75r(接头藏入液滴内部,同色不可见);
+      // - 端径 0.36·r(两端按各自液滴比例张开,大滴端更粗)、颈径 0.30·min(r),
+      //   颈/端比 ≈0.83——两端略宽、中间收窄的细颈;
+      // - 拉伸变细:半径 ×√(restLen/dist)(体积守恒的观感,拉伸成细丝而不断裂)
+      const ra = d.r[ia]!;
+      const rb = d.r[ib]!;
+      const rNeck = 0.3 * Math.min(ra, rb);
+      const rEndA = 0.36 * ra;
+      const rEndB = 0.36 * rb;
+      const bsState = engine.bridges.state;
+      const thin = Math.min(
+        1.25,
+        Math.max(0.5, Math.sqrt(bsState.restLen[k]! / len)),
+      );
+      const pax = ax + ux * (0.75 * ra);
+      const pay = ay + uy * (0.75 * ra);
+      const paz = az + uz * (0.75 * ra);
+      const pbx = bx - ux * (0.75 * rb);
+      const pby = by - uy * (0.75 * rb);
+      const pbz = bz - uz * (0.75 * rb);
       for (let s = 0; s <= BRIDGE_LEN; s++) {
         const t = s / BRIDGE_LEN;
-        const rr = rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5;
-        const cx = ax + (bx - ax) * t;
-        const cy = ay + (by - ay) * t;
-        const cz = az + (bz - az) * t;
+        const rEnd = t < 0.5 ? rEndA : rEndB;
+        const rr =
+          (rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5) * thin;
+        const cx = pax + (pbx - pax) * t;
+        const cy = pay + (pby - pay) * t;
+        const cz = paz + (pbz - paz) * t;
         for (let r = 0; r < BRIDGE_RAD; r++) {
           const ang = (r / BRIDGE_RAD) * Math.PI * 2;
           const ox = Math.cos(ang) * rr;
@@ -329,7 +351,7 @@ export function mountGrayViewer(
           bridgePos[vi + 2] = cz + n1z * ox + n2z * oy;
         }
       }
-      // 流动粒子推进(方向随流量符号;速度风格化固定)
+      // 流动粒子推进(方向随流量符号;速度风格化固定;沿桥可见段迁移)
       const q = engine.bridges.flowRate[k]!;
       for (let f = 0; f < FLOW_PER_BRIDGE; f++) {
         const fi = k * FLOW_PER_BRIDGE + f;
@@ -338,9 +360,9 @@ export function mountGrayViewer(
         }
         const ft = flowT[fi]!;
         const vi = fi * 3;
-        flowPos[vi] = ax + (bx - ax) * ft;
-        flowPos[vi + 1] = ay + (by - ay) * ft;
-        flowPos[vi + 2] = az + (bz - az) * ft;
+        flowPos[vi] = pax + (pbx - pax) * ft;
+        flowPos[vi + 1] = pay + (pby - pay) * ft;
+        flowPos[vi + 2] = paz + (pbz - paz) * ft;
       }
     }
     bridgePosAttr.needsUpdate = true;
@@ -545,8 +567,8 @@ export function mountGrayViewer(
       r,
     );
   });
-  // 落桥对:两颗半径不等的液滴落在间隙 3mm 处 → drainTime 后必然成桥,
-  // 半径差驱动拉普拉斯流动(小→大),供液桥与流动粒子验收
+  // 落桥对:两颗半径不等的液滴近距落下 → drainTime 后成桥;持距下限把两滴推开到
+  // 清晰净间距(桥颈可见),半径差驱动拉普拉斯流动(小→大),供液桥与流动粒子验收
   btnPair.addEventListener("click", () => {
     const cx = 0.35 + rng() * 0.3;
     const cy = 0.35 + rng() * 0.3;
@@ -557,11 +579,13 @@ export function mountGrayViewer(
     engine.spawnDroplet(cx - (r1 + gap / 2), cy, z0 + r1, r1);
     engine.spawnDroplet(cx + (r2 + gap / 2), cy, z0 + r2, r2);
   });
-  // 网络场景(调优 #6):中心+六边形 7 滴确定性布点,辐射桥+环桥全成网
+  // 网络场景(调优 #6 + 第三批①修订):中心+六边形 7 滴确定性布点。
+  // 连接语义下成桥距离无关:ring=0.12 展开成大间距网络——6 辐条 + 6 环边 +
+  // 6 条次邻接长桥全部成桥,3 条穿过中心的直径桥被胶囊排斥自然剪枝(18 桥)
   btnNet.addEventListener("click", () => {
     const rc = 0.022;
     const rr = 0.016;
-    const ring = 0.034; // 六边形半径:中心-辐条与相邻环边均落在桥接区间
+    const ring = 0.12;
     const z0 = engine.field.totalHeight(0.5, 0.5) + params.dropHeight;
     engine.spawnDroplet(0.5, 0.5, z0 + rc, rc);
     for (let k = 0; k < 6; k++) {

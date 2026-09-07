@@ -1,11 +1,17 @@
 // ============================================================
 // 液桥(任务①,物理模型收官):连接两颗漂浮滴的液柱实体。
-// 形状合同(渲染侧同源):两端宽(嵌入液滴)、中间窄(颈部)。
-// 物理:张力弹簧(绳式持距)+ 拉普拉斯压差流动(小滴 → 大滴,体积守恒)
-// + 侵入治理(「液桥经过第三方液滴」三重对策,2026-09-07 裁决备案):
-//   a) 桥本征短程:仅在桥接区间(间隙 < bridgeRange·(r₁+r₂))生成;
-//   b) 生成前胶囊排斥:桥轴线段被第三方液滴占据(膨胀 5%)→ 拒绝成桥;
-//   c) 生存期复检:侵入持续 > grace(0.2s)→ 断桥,双端进冷却防抖。
+// 形状合同(渲染侧同源):两端略宽(嵌入液滴)、中间收窄(颈部)。
+// 连接语义(调优第三批①修订,委托方裁决:液桥=关系网的边,重点是连接而非毛细作用):
+//   成桥距离无关——任意两颗漂浮滴持续 drainTime 即成桥,远距对保持当前距离
+//   (restLen=成桥距,连接而非收缩),靠得过近的对被推开到持距下限(最小净间距)。
+// 物理:张力弹簧(常态双侧持距;拖拽期单侧——被拖端零阻力,牵连端被轻微拽动;
+//       拉伸不断裂:距离变化由 rebaseRestLengths 吸收为新常态,第三批②修订)
+// + 拉普拉斯压差流动(小滴 → 大滴,体积守恒)
+// + 侵入治理(「液桥穿过第三方液滴」;断桥的唯一途径):
+//   a) 生成前胶囊排斥:桥轴线段被第三方液滴占据(膨胀 5%)→ 拒绝成桥;
+//   b) 生存期 0.2s 复检:侵入持续 > grace → 断桥,双端进冷却防抖
+//      (断桥同时清 pending,防冷却结束后凭旧计时瞬间重桥);
+//   c) 交换删除重映射。
 // 确定性:预分配池、固定顺序扫描、无对象分配热路径。
 // ============================================================
 
@@ -35,15 +41,17 @@ export class BridgeSystem {
   ) {
     const n = params.maxDroplets;
     this.maxN = n;
+    // 桥池容量 = 完全图的边数(连接语义:任意两漂浮滴都可成桥)
+    const slots = (n * (n - 1)) / 2;
     this.state = {
       count: 0,
-      a: new Int32Array(n),
-      b: new Int32Array(n),
-      restLen: new Float32Array(n),
-      cut: new Uint8Array(n),
-      intrudeT: new Float32Array(n),
+      a: new Int32Array(slots),
+      b: new Int32Array(slots),
+      restLen: new Float32Array(slots),
+      cut: new Uint8Array(slots),
+      intrudeT: new Float32Array(slots),
     };
-    this.flowRate = new Float32Array(n);
+    this.flowRate = new Float32Array(slots);
     this.pending = new Float32Array(n * n);
   }
 
@@ -59,7 +67,10 @@ export class BridgeSystem {
     this.stepActive(dt);
   }
 
-  /** 成桥扫描:漂浮对 + 桥接区间 + 双方冷却完毕 + 桥轴胶囊无第三方占据 */
+  /**
+   * 成桥扫描(连接语义,距离无关):漂浮对 + 双方冷却完毕 + 未成桥 + 桥轴胶囊
+   * 无第三方占据,持续 drainTime → 成桥。远近一律可连;远距对连接不收缩。
+   */
   private scanFormation(dt: number): void {
     const d = this.drops.state;
     const p = this.params;
@@ -72,11 +83,7 @@ export class BridgeSystem {
         const dx = d.x[j]! - d.x[i]!;
         const dy = d.y[j]! - d.y[i]!;
         const dist = Math.hypot(dx, dy);
-        const rSum = d.r[i]! + d.r[j]!;
-        if (dist === 0 || dist >= rSum * (1 + p.bridgeRange)) {
-          this.pending[key] = 0;
-          continue;
-        }
+        if (dist === 0) continue; // 恒重合病态对(引擎不会产生;防除零)
         if (this.pairBridged(i, j) >= 0) continue;
         // 生成前排斥:桥轴胶囊被第三方占据 → 不累计、不成桥
         if (this.capsuleIntruded(i, j, dist) >= 0) {
@@ -93,11 +100,16 @@ export class BridgeSystem {
 
   private form(i: number, j: number, dist: number): void {
     const s = this.state;
-    if (s.count >= this.params.maxDroplets) return;
+    const d = this.drops.state;
+    if (s.count >= s.a.length) return;
     const k = s.count;
     s.a[k] = i;
     s.b[k] = j;
-    s.restLen[k] = dist;
+    // restLen(连接语义):远距对 = 成桥距(把当前距离固定下来,连接而非收缩);
+    // 近距对 = 持距下限 rSum·(1+bridgeRestGap)(双侧弹簧推开,根治「间距过小」)
+    const rSum = d.r[i]! + d.r[j]!;
+    const rest = rSum * (1 + this.params.bridgeRestGap);
+    s.restLen[k] = dist > rest ? dist : rest;
     s.cut[k] = 0;
     s.intrudeT[k] = 0;
     this.flowRate[k] = 0;
@@ -109,6 +121,8 @@ export class BridgeSystem {
   private breakBridge(k: number): void {
     const s = this.state;
     const last = s.count - 1;
+    const i = s.a[k]!;
+    const j = s.b[k]!;
     if (k !== last) {
       s.a[k] = s.a[last]!;
       s.b[k] = s.b[last]!;
@@ -119,9 +133,12 @@ export class BridgeSystem {
     }
     s.count--;
     this.brokenCount++;
+    // 清 pending(防抖闭环):成桥距离无关后没有距离门槛替它清零,
+    // 不清会在冷却结束的瞬间凭旧计时立刻重桥(断裂形同虚设)
+    this.pending[i * this.maxN + j] = 0;
   }
 
-  /** 生存期:张力持距 + 超限断桥 + 拉普拉斯流动 + 侵入复检 */
+  /** 生存期:张力持距 + 拉普拉斯流动 + 侵入复检(拉伸不断裂,第三批②修订) */
   private stepActive(dt: number): void {
     const d = this.drops.state;
     const p = this.params;
@@ -139,21 +156,25 @@ export class BridgeSystem {
       const dist = Math.hypot(dx, dy);
       if (dist === 0) continue;
       const rest = s.restLen[k]!;
-      // 超拉伸断桥(双端进冷却,防立即重桥抖动)
-      if (dist > rest * (1 + p.bridgeBreakStretch)) {
-        this.cooldownPair(i, j);
-        this.breakBridge(k);
-        continue;
-      }
       if (s.cut[k] === 0) {
-        // 张力:绳式(仅拉伸段出力),F = k·ΔL + c·u(u=分离向相对速度)。
-        // 阻尼项隐式化(c·dt/m 在 4·dt/12.7g ≈ 2.1 > 2 会显式失稳,与场阻尼同一对策):
-        // u′ = (u − A·k·ΔL·dt)/(1 + A·c·dt),A = 1/m_a + 1/m_b,冲量 J = (u − u′)/A
-        if (dist > rest) {
-          const nx = dx / dist;
-          const ny = dy / dist;
-          const ma = this.mass(i);
-          const mb = this.mass(j);
+        // 张力(第三批②修订:拖拽期单侧、常态双侧、拉伸不断裂):
+        // F = k·ΔL + c·u(u=分离向相对速度)。阻尼隐式化(显式失稳,与场阻尼同一对策)。
+        const nx = dx / dist;
+        const ny = dy / dist;
+        const ma = this.mass(i);
+        const mb = this.mass(j);
+        const iDrag = d.drag[i] === 1;
+        const jDrag = d.drag[j] === 1;
+        if (iDrag || jDrag) {
+          // 单侧:被拖端由手主导(移动阻力同无桥),桥只牵拉未被拖的一端
+          // (牵连端再受 dragAnchorK 强锚定 → 只被轻微拽动,桥拉伸而不断裂)。
+          // 符号同双侧:i 端受 +n(拉向 j),j 端受 −n(拉向 i),拉伸时互相靠近。
+          if (iDrag && !jDrag) {
+            this.axialImpulse(j, nx, ny, mb, -p.bridgeTensionK * (dist - rest), dt);
+          } else if (jDrag && !iDrag) {
+            this.axialImpulse(i, nx, ny, ma, p.bridgeTensionK * (dist - rest), dt);
+          }
+        } else {
           const mob = 1 / ma + 1 / mb;
           const u = (d.vx[j]! - d.vx[i]!) * nx + (d.vy[j]! - d.vy[i]!) * ny;
           const jImp =
@@ -176,7 +197,7 @@ export class BridgeSystem {
           this.transfer(i, j, q > 0 ? dv : -dv);
         }
       }
-      // 侵入复检:第三方占据桥轴,持续 > grace → 断桥
+      // 侵入复检:第三方占据桥轴,持续 > grace → 断桥(唯一的断桥途径)
       if (this.capsuleIntruded(i, j, dist) >= 0) {
         s.intrudeT[k] = s.intrudeT[k]! + dt;
         if (s.intrudeT[k]! > INTRUDE_GRACE) {
@@ -188,6 +209,28 @@ export class BridgeSystem {
         s.intrudeT[k] = 0;
       }
     }
+  }
+
+  /**
+   * 单侧轴向冲量(拖拽期桥张力):对端点 m 施加沿轴(+n)方向的弹簧加速度,
+   * 轴向速度隐式阻尼。force>0 推向 +n(i→j 方向)。
+   */
+  private axialImpulse(
+    m: number,
+    nx: number,
+    ny: number,
+    mass: number,
+    force: number,
+    dt: number,
+  ): void {
+    const d = this.drops.state;
+    const vn = d.vx[m]! * nx + d.vy[m]! * ny;
+    const acc = force / mass;
+    const damp = this.params.bridgeTensionC / mass;
+    const vnNew = (vn + acc * dt) / (1 + damp * dt);
+    const dvn = vnNew - vn;
+    d.vx[m] = d.vx[m]! + dvn * nx;
+    d.vy[m] = d.vy[m]! + dvn * ny;
   }
 
   /** 桥内体积转移(守恒):from → to 为正;更新半径与平衡浸深(d* 只依赖 r) */
@@ -280,6 +323,26 @@ export class BridgeSystem {
       }
     }
     return n;
+  }
+
+  /**
+   * 重定液滴 i 全部桥的 restLen = max(当前距, 持距下限)(重锚定释放后调用,
+   * 第三批②修订):拖拽造成的距离变化被桥吸收为新常态——连接保持、不回弹、
+   * 不把牵连端继续拽向旧距离。
+   */
+  rebaseRestLengths(i: number): void {
+    const s = this.state;
+    const d = this.drops.state;
+    for (let k = 0; k < s.count; k++) {
+      if (s.a[k] !== i && s.b[k] !== i) continue;
+      const j = s.a[k] === i ? s.b[k]! : s.a[k]!;
+      if (j >= d.count || d.floating[j] !== 1) continue;
+      const dist = Math.hypot(d.x[j]! - d.x[i]!, d.y[j]! - d.y[i]!);
+      if (dist === 0) continue;
+      const rest =
+        (d.r[i]! + d.r[j]!) * (1 + this.params.bridgeRestGap);
+      s.restLen[k] = dist > rest ? dist : rest;
+    }
   }
 
   /** 焦点模式:切断/恢复指定桥(cut = 张力关 + 不渲染 + 流量清零) */

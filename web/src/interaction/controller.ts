@@ -40,6 +40,9 @@ const DOUBLE_CLICK_DT = 0.35;
 const DOUBLE_CLICK_DXY = 14;
 /** 命中拾取的屏幕容差(px) */
 const GRAB_TOLERANCE = 14;
+/** 悬停退出滞后(×容差圆):悬停中的液滴被升力抬升/波纹顶起时屏幕圆会移动
+ *  数像素,若退出沿用进入容差会帧率级翻转悬停态 → 升力抖动(第三批 #2 抖动根因) */
+const HOVER_EXIT_EXPAND = 1.6;
 /** 焦点转场冻结时长(秒,§6 转场期冻结输入) */
 export const FOCUS_FREEZE = 0.6;
 
@@ -146,11 +149,25 @@ export class InteractionController {
 
     // ---- 悬停 ----
     if (pointer.valid) {
-      if (hit >= 0) {
-        if (this.phase !== "hover" || this.target !== hit) {
+      // 滞后保持:已在悬停且指针仍在该滴的扩张圆内 → 维持目标不重判
+      // (升力抬升/波纹顶起都会移动屏幕圆,无滞后会帧率级翻转悬停态)
+      const held =
+        this.phase === "hover" &&
+        this.target >= 0 &&
+        this.target < snapshot.count &&
+        Math.hypot(
+          snapshot.cx[this.target]! - pointer.sx,
+          snapshot.cy[this.target]! - pointer.sy,
+        ) <=
+          (snapshot.cr[this.target]! + GRAB_TOLERANCE) * HOVER_EXIT_EXPAND;
+      const picked = held
+        ? this.target
+        : this.pick(snapshot, pointer.sx, pointer.sy);
+      if (picked >= 0) {
+        if (this.phase !== "hover" || this.target !== picked) {
           this.phase = "hover";
-          this.target = hit;
-          intents.push({ kind: "hoverDroplet", index: hit });
+          this.target = picked;
+          intents.push({ kind: "hoverDroplet", index: picked });
         }
       } else {
         this.phase = "idle";

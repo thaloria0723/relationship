@@ -78,7 +78,8 @@ export type WaterSimParams = {
   capillaryA: number;
   /** 毛细作用距离(×(r₁+r₂),范围 1–4) */
   capillaryRange: number;
-  /** 桥接触发间隙(×(r₁+r₂),范围 0.05–0.25) */
+  /** 桥接触发间隙(×(r₁+r₂),范围 0.05–0.25)。⚠ 仅近接触窗口语义(pairs.ts:
+   *  碰撞弹开抑制/聚合计时);网络模式的成桥本身距离无关(连接语义,调优第三批①修订) */
   bridgeRange: number;
   /** 排液延迟(秒,防瞬聚,范围 0.03–0.2) */
   drainTime: number;
@@ -94,15 +95,30 @@ export type WaterSimParams = {
   /** 钉扎松弛半径(m):离出生锚点该距离内自由漂移,超出受恢复力 */
   pinRadius: number;
 
+  // ---- 漂移治理(调优第三批 #2,2026-09-07) ----
+  /** 漂浮滴水平速度漂移阻尼(s⁻¹,风格化线性阻尼叠加在 Stokes 上;0=仅物理 Stokes)。
+   *  物理 Stokes 对厘米级液滴仅 ~0.05 s⁻¹,波浪推动下液滴长时间乱漂不归位 */
+  driftDamping: number;
+  /** 落点回位弹簧劲度(s⁻²,朝出生锚点;0=关)。与 driftDamping 组成欠阻尼回弹,
+   *  波停后液滴回到初始落点 */
+  homeK: number;
+  /** 牵连位移圈(米;拖拽期非被控液滴离出生锚点的硬上限):被桥牵连的液滴
+   *  移动阻力极大,只能在此圈内被轻微拽动,桥随之拉伸而不断裂(第三批②修订) */
+  dragAnchorShift: number;
+
   // ---- 液桥(任务①,2026-09-07;物理模型收官项) ----
-  /** 桥张力劲度(N/m,绳式:仅拉伸段出力) */
+  /** 桥张力劲度(N/m,双侧弹簧:拉伸回拉、压缩推开,持距于 restLen;
+   *  拖拽期单侧出力——被拖端零阻力(手感同无桥),只牵拉对端) */
   bridgeTensionK: number;
   /** 桥张力轴向阻尼(N·s/m) */
   bridgeTensionC: number;
-  /** 断桥拉伸阈(×restLen;超出即断,双端进 mergeCooldown 防抖) */
-  bridgeBreakStretch: number;
   /** 桥内流动系数(m²/s):Q = k·π·r_neck²·(1/r_a − 1/r_b),小滴 → 大滴 */
   bridgeFlowK: number;
+  /** 成桥持距下限间隙(×(r₁+r₂)):restLen = max(成桥距, rSum·(1+此值))。
+   *  连接语义(调优第三批①修订,委托方裁决:液桥=关系的边,重点是连接而非毛细作用):
+   *  - 成桥距离无关:任意两漂浮滴都能成桥,远距对保持当前距离(连接而非收缩);
+   *  - 靠得过近的对被双侧弹簧推开到此净间距(「液滴间距过小」的根治) */
+  bridgeRestGap: number;
 
   // ---- 交互意图 API(任务②,2026-09-07;模块②意图的物理承接) ----
   /** 悬停升力:有效平衡浸深 ×(1−hoverLift·lift) */
@@ -195,12 +211,22 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   maxDroplets: 32,
   mergeEnabled: false,
   pinStrength: 6e-3,
-  pinRadius: 0.06,
+  /** 调优第三批 #2:0.06→0.03(自由漂移区过大是「乱飘」主因之一;回位主力交给 homeK) */
+  pinRadius: 0.03,
 
-  bridgeTensionK: 8,
-  bridgeTensionC: 2,
-  bridgeBreakStretch: 1.2,
+  /** 调优第三批 #2:漂移阻尼 + 落点回位弹簧(委托方验收反馈「乱飘/阻力低/不回落点」) */
+  driftDamping: 2.5,
+  homeK: 4,
+  /** 牵连位移圈 5mm(第三批②修订):位置级硬约束,不受桥张力大小影响 */
+  dragAnchorShift: 0.005,
+
+  /** 第三批②修订:连接语义下桥拉伸不断裂(只有侵入治理断桥);软化张力使
+   *  被拖端可自由拉伸、牵连端只被轻微拽动 */
+  bridgeTensionK: 4,
+  bridgeTensionC: 1,
   bridgeFlowK: 1.6e-5,
+  /** 净间距 = 1.0·rSum(液滴半径同量级的清晰间隔;「液滴间距过小」的根治) */
+  bridgeRestGap: 1.0,
 
   hoverLift: 0.78,
   hoverLiftTau: 0.3,
@@ -262,6 +288,9 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["maxDroplets", 8, 64],
   ["pinStrength", 0, 0.1],
   ["pinRadius", 0.005, 0.5],
+  ["driftDamping", 0, 10],
+  ["homeK", 0, 30],
+  ["dragAnchorShift", 0.001, 0.05],
   ["kernelSigma", 0.8, 2],
   ["impulseGain", 0.3, 2],
   ["depthRateGain", 0.3, 2],
@@ -274,8 +303,8 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["initialFloaters", 0, 16],
   ["bridgeTensionK", 0, 200],
   ["bridgeTensionC", 0, 40],
-  ["bridgeBreakStretch", 0.2, 2],
   ["bridgeFlowK", 0, 1e-3],
+  ["bridgeRestGap", 0.05, 2],
   ["hoverLift", 0, 0.9],
   ["hoverLiftTau", 0.05, 1],
   ["dragFollow", 50, 2000],

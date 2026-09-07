@@ -125,17 +125,26 @@ describe("watersim/droplet 空中段与入水", () => {
 });
 
 describe("watersim/droplet 坡度漂移(耦合链末环:波推液滴)", () => {
-  it("漂浮滴向邻近凹陷下滑(F = −g_flow·V_sub·∇h)", () => {
+  it("漂浮滴向邻近凹陷下滑(F = −g_flow·V_sub·∇h),但漂移有界、波停后回到落点(调优第三批 #2)", () => {
     const engine = new WaterEngine(defaultParams);
     const r = defaultParams.rMin;
     const x0 = 0.35;
     spawnFloating(engine.droplets, x0, 0.5, r);
     // 右侧 25cm 处挖一个深凹(静态液面坡指向凹点)
     engine.addImpulse(0.6, 0.5, 0.03, -0.03);
-    for (let s = 0; s < Math.round(2.0 / DT); s++) engine.stepFixed();
-    const x = engine.droplets.state.x[0]!;
-    expect(x).toBeGreaterThan(x0 + 0.002); // 2s 内向凹点漂移(实测 ~2.8mm)>2mm
-    expect(Number.isFinite(x)).toBe(true);
+    let maxX = x0;
+    for (let s = 0; s < Math.round(5.0 / DT); s++) {
+      engine.stepFixed();
+      maxX = Math.max(maxX, engine.droplets.state.x[0]!);
+    }
+    // 方向:坡度响应仍存在(向凹点移动过)
+    expect(maxX).toBeGreaterThan(x0);
+    // 有界:不再乱飘(超出 pinRadius 即被钉扎+回位弹簧约束)
+    expect(maxX - x0).toBeLessThan(defaultParams.pinRadius);
+    // 回位:波幅衰减后回到初始落点附近(<4mm)
+    const xEnd = engine.droplets.state.x[0]!;
+    expect(Math.abs(xEnd - x0)).toBeLessThan(0.004);
+    expect(Number.isFinite(xEnd)).toBe(true);
   });
 
   it("静水中漂浮滴位置稳定(无源则无漂移)", () => {
@@ -146,6 +155,129 @@ describe("watersim/droplet 坡度漂移(耦合链末环:波推液滴)", () => {
     const d = engine.droplets.state;
     expect(Math.abs(d.x[0]! - 0.5)).toBeLessThan(1e-4);
     expect(Math.abs(d.y[0]! - 0.5)).toBeLessThan(1e-4);
+  });
+});
+
+describe("watersim/droplet 漂移治理(调优第三批 #2:乱飘/阻力低/不回落点)", () => {
+  it("水平速度受漂移阻尼快速衰减(Stokes 单独 2s 后仍 ~91%,叠加阻尼后 <10%)", () => {
+    const engine = new WaterEngine(defaultParams);
+    spawnFloating(engine.droplets, 0.5, 0.5, 0.016);
+    engine.droplets.state.vx[0] = 0.05;
+    for (let s = 0; s < Math.round(2.0 / DT); s++) engine.stepFixed();
+    expect(Math.abs(engine.droplets.state.vx[0]!)).toBeLessThan(0.005);
+  });
+
+  it("被挪离落点的漂浮滴自动弹回初始落点(homeK 回位弹簧)", () => {
+    const engine = new WaterEngine(defaultParams);
+    spawnFloating(engine.droplets, 0.5, 0.5, 0.016);
+    engine.droplets.state.x[0] = 0.5 + 0.03; // 挪到落点 3cm 外
+    for (let s = 0; s < Math.round(3.0 / DT); s++) engine.stepFixed();
+    expect(Math.abs(engine.droplets.state.x[0]! - 0.5)).toBeLessThan(0.004);
+  });
+});
+
+describe("watersim/droplet 拖拽释放(运动后弹回初始落点)", () => {
+  /** 拖拽 index 0 到指定目标 dragSec 秒后释放,再推进 settleSec 秒 */
+  function dragAndRelease(
+    tx: number,
+    dragSec: number,
+    settleSec: number,
+  ): number {
+    const engine = new WaterEngine(defaultParams);
+    spawnFloating(engine.droplets, 0.4, 0.5, 0.016);
+    const drops = engine.droplets;
+    drops.beginDrag(0, 0.4, 0.5);
+    for (let s = 0; s < Math.round(dragSec / DT); s++) {
+      drops.setDragTarget(tx, 0.5);
+      engine.stepFixed();
+    }
+    drops.endDrag();
+    for (let s = 0; s < Math.round(settleSec / DT); s++) engine.stepFixed();
+    return drops.state.x[0]!;
+  }
+
+  it("快拖小幅释放 → 弹回初始落点(anchor,不再用抓取位)", () => {
+    const x = dragAndRelease(0.44, 0.2, 3.0); // 拖 0.2s、挪 4cm
+    expect(Math.abs(x - 0.4)).toBeLessThan(0.004);
+  });
+
+  it("拖住 ≥1s 但位移 <0.15m → 仍弹回初始落点(重锚定需同时满足大幅位移)", () => {
+    const x = dragAndRelease(0.45, 1.5, 3.0); // 拖 1.5s、挪 5cm
+    expect(Math.abs(x - 0.4)).toBeLessThan(0.004);
+  });
+
+  it("拖住 ≥1s 且位移 ≥0.15m → 重锚定留在松手处(用户布置关系网)", () => {
+    const x = dragAndRelease(0.7, 1.5, 3.0); // 拖 1.5s、挪 30cm
+    expect(Math.abs(x - 0.7)).toBeLessThan(0.004);
+  });
+});
+
+describe("watersim/engine 拖拽分层阻力(第三批②:被控端自由/牵连端强阻力)", () => {
+  it("拖拽被桥连接的液滴:牵连端只被轻微拽动(≤6mm),桥拉伸不断裂,重锚定后桥长吸收新距离", () => {
+    const engine = new WaterEngine(defaultParams);
+    spawnFloating(engine.droplets, 0.4, 0.5, 0.02);
+    spawnFloating(engine.droplets, 0.5, 0.5, 0.02);
+    for (let s = 0; s < Math.round(0.5 / DT); s++) engine.stepFixed();
+    expect(engine.bridges.state.count).toBe(1);
+    const d = engine.droplets.state;
+    const x1a = d.x[1]!;
+    // 拖 0 号到 0.18(位移 0.22m、1.5s ≥1s → 重锚定模式)
+    engine.beginDrag(0, d.x[0]!, 0.5);
+    for (let s = 0; s < Math.round(1.5 / DT); s++) {
+      engine.moveDrag(0.18, 0.5);
+      engine.stepFixed();
+    }
+    engine.endDrag();
+    expect(Math.abs(d.x[1]! - x1a)).toBeLessThan(0.006); // 牵连端轻微拽动
+    expect(engine.bridges.state.count).toBe(1); // 桥拉伸不断裂
+    const dist = Math.abs(d.x[1]! - d.x[0]!);
+    expect(dist).toBeGreaterThan(0.15); // 桥明显拉伸
+    expect(engine.bridges.state.restLen[0]!).toBeCloseTo(dist, 2); // 桥长已重定
+    // 之后 2s:牵连端不被继续拖向旧距离,被控端留在新位
+    for (let s = 0; s < Math.round(2.0 / DT); s++) engine.stepFixed();
+    expect(Math.abs(d.x[0]! - 0.18)).toBeLessThan(0.01);
+    expect(Math.abs(d.x[1]! - x1a)).toBeLessThan(0.008);
+  });
+});
+
+describe("watersim/engine 悬停稳定(第三批②:悬浮液滴不异常抖动)", () => {
+  it("持续悬停:升力稳定浮出,稳态 z 波动 ≤2mm", () => {
+    const engine = new WaterEngine(defaultParams);
+    spawnFloating(engine.droplets, 0.5, 0.5, 0.02);
+    engine.setDropletHover(0);
+    for (let s = 0; s < Math.round(1.0 / DT); s++) engine.stepFixed();
+    let zMin = Infinity;
+    let zMax = -Infinity;
+    for (let s = 0; s < Math.round(3.0 / DT); s++) {
+      engine.stepFixed();
+      const z = engine.droplets.state.z[0]!;
+      zMin = Math.min(zMin, z);
+      zMax = Math.max(zMax, z);
+    }
+    expect(zMax - zMin).toBeLessThan(0.002);
+  });
+});
+
+describe("watersim/droplet removeAt 字段完整性", () => {
+  it("交换删除搬运全部交互字段(home/lift/drag/returning/lev 不残留被删滴的值)", () => {
+    const engine = new WaterEngine(defaultParams);
+    const drops = engine.droplets;
+    spawnFloating(drops, 0.3, 0.3, 0.016);
+    spawnFloating(drops, 0.7, 0.7, 0.016);
+    spawnFloating(drops, 0.5, 0.5, 0.016);
+    const d = drops.state;
+    // 末滴(2 号)带全套交互状态
+    d.homeX[2] = 0.9;
+    d.homeY[2] = 0.8;
+    d.lift[2] = 0.5;
+    d.returning[2] = 1;
+    d.lev[2] = 1;
+    drops.removeAt(0); // last=2 换入 0
+    expect(d.homeX[0]).toBeCloseTo(0.9, 6);
+    expect(d.homeY[0]).toBeCloseTo(0.8, 6);
+    expect(d.lift[0]).toBeCloseTo(0.5, 6);
+    expect(d.returning[0]).toBe(1);
+    expect(d.lev[0]).toBe(1);
   });
 });
 

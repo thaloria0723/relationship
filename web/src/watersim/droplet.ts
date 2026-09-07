@@ -139,6 +139,12 @@ export class DropletSystem {
       d.cooldown[i] = d.cooldown[last]!;
       d.anchorX[i] = d.anchorX[last]!;
       d.anchorY[i] = d.anchorY[last]!;
+      d.lift[i] = d.lift[last]!;
+      d.homeX[i] = d.homeX[last]!;
+      d.homeY[i] = d.homeY[last]!;
+      d.drag[i] = d.drag[last]!;
+      d.returning[i] = d.returning[last]!;
+      d.lev[i] = d.lev[last]!;
     }
     d.count = last;
   }
@@ -185,28 +191,34 @@ export class DropletSystem {
     this.dragTY = y;
   }
 
-  endDrag(): void {
+  /**
+   * 结束拖拽。返回 true = 重锚定模式(锚点迁至松手处,引擎据此重定桥长)。
+   * 拖拽双模式(调优第三批 #2 收紧门槛):重锚定须「拖住 ≥1.0s 且位移 ≥0.15m」
+   * 同时成立(原 OR 判定下慢拖 1s 即重锚定,常见误触导致液滴滞留异处);
+   * 其余一律弹回初始落点(出生锚点 anchor,调优第三批:不再用抓取位)
+   */
+  endDrag(): boolean {
     const i = this.dragIndex;
-    if (i < 0) return;
+    if (i < 0) return false;
     const d = this.state;
     d.drag[i] = 0;
-    // 拖拽双模式(调优 #2):拖住 ≥1.0s 或位移 ≥0.15m → 重锚定在松手处
-    // (用户布置关系网);快拖 → 按规格③缓慢弹回抓取位
     const held = this.dragSteps * this.params.dt >= 1.0;
     const moved =
       Math.hypot(d.x[i]! - this.dragStartX, d.y[i]! - this.dragStartY) >= 0.15;
-    d.homeX[i] = d.x[i]!;
-    d.homeY[i] = d.y[i]!;
-    if (held || moved) {
+    if (held && moved) {
       d.anchorX[i] = d.x[i]!;
       d.anchorY[i] = d.y[i]!;
+      d.homeX[i] = d.x[i]!;
+      d.homeY[i] = d.y[i]!;
       d.returning[i] = 0;
-    } else {
-      d.homeX[i] = this.dragStartX;
-      d.homeY[i] = this.dragStartY;
-      d.returning[i] = 1;
+      this.dragIndex = -1;
+      return true;
     }
+    d.homeX[i] = d.anchorX[i]!;
+    d.homeY[i] = d.anchorY[i]!;
+    d.returning[i] = 1;
     this.dragIndex = -1;
+    return false;
   }
 
   setLevitate(i: number, on: boolean): void {
@@ -323,6 +335,11 @@ export class DropletSystem {
         skipEnv = true;
       }
       if (!skipEnv) {
+      // 2.45) 落点回位弹簧:始终朝出生锚点回拉(与钉扎死区语义互补:死区内
+      //       也有回位,波停即归位)。与 driftDamping 组成欠阻尼回弹,
+      //       波浪仍可推动液滴小幅晃动(物理感),停止扰动后回到初始落点。
+      d.vx[i] = d.vx[i]! - p.homeK * (x - d.anchorX[i]!) * dt;
+      d.vy[i] = d.vy[i]! - p.homeK * (y - d.anchorY[i]!) * dt;
       // 2.5) 接触线钉扎恢复力(裁决 §12.2-C′,近似接触角滞后 pinning):
       //      离出生锚点超过 pinRadius 后,受线性弹簧回拉(临界阻尼增稳);
       //      pinRadius 内自由漂移(波浪推动不受限),锚点固定不漂移。
@@ -353,9 +370,12 @@ export class DropletSystem {
       const vSub = submergenceVolume(dNew, r);
       const aSlope =
         (-p.slopeCoupling * field.gFlow * (vSub / vR)) / p.densityRatio;
-      // 4) Stokes 阻力:a = −6πμr·v / m,m = ratio·ρ_w·V_R
+      // 4) Stokes 阻力 + 漂移阻尼:a = −6πμr·v / m,m = ratio·ρ_w·V_R。
+      //    物理 Stokes 对厘米级液滴仅 ~0.05 s⁻¹,波浪推动下液滴长时间乱漂;
+      //    driftDamping 为风格化线性阻尼(调优第三批 #2「移动阻力过低」)
       const aDrag =
-        (6 * Math.PI * p.waterMu * r) / (p.densityRatio * p.waterRho * vR);
+        (6 * Math.PI * p.waterMu * r) / (p.densityRatio * p.waterRho * vR) +
+        p.driftDamping;
       const vx = d.vx[i]! + aSlope * grad[0]! * dt - aDrag * d.vx[i]! * dt;
       const vy = d.vy[i]! + aSlope * grad[1]! * dt - aDrag * d.vy[i]! * dt;
       d.vx[i] = vx;
@@ -363,6 +383,28 @@ export class DropletSystem {
       } // skipEnv(交互接管时跳过坡度/钉扎;速度已由接管分支直接写入)
       d.x[i] = Math.min(Math.max(x + d.vx[i]! * dt, lo), hi);
       d.y[i] = Math.min(Math.max(y + d.vy[i]! * dt, lo), hi);
+      // 2.9) 牵连位移圈(第三批②修订):拖拽进行时,未被拖的漂浮滴(被牵连端)
+      //      移动阻力极大——离出生锚点超过 dragAnchorShift 即投影回圈内并削掉
+      //      外向径向速度。位置级硬约束,不依赖桥张力/弹簧刚度比,按构造保证
+      //      「只能被轻微拽动」;被拖端走 skipEnv 分支不受影响,桥拉伸而不断裂。
+      if (this.dragIndex >= 0 && d.drag[i] !== 1) {
+        const adx = d.x[i]! - d.anchorX[i]!;
+        const ady = d.y[i]! - d.anchorY[i]!;
+        const aDist = Math.hypot(adx, ady);
+        if (aDist > p.dragAnchorShift) {
+          const s = p.dragAnchorShift / aDist;
+          d.x[i] = d.anchorX[i]! + adx * s;
+          d.y[i] = d.anchorY[i]! + ady * s;
+          const nx = adx / aDist;
+          const ny = ady / aDist;
+          const vn = d.vx[i]! * nx + d.vy[i]! * ny;
+          if (vn > 0) {
+            // 只削外向分量(切向运动不干预),防约束边界上的速度蓄积
+            d.vx[i] = d.vx[i]! - vn * nx;
+            d.vy[i] = d.vy[i]! - vn * ny;
+          }
+        }
+      }
       // 5) 贴水:中心 = 总高 + (R − d)
       d.z[i] = field.totalHeight(d.x[i]!, d.y[i]!) + (r - dNew);
       // 6) 形状弹簧(§4.3 Deformation;碰撞/聚合踢振由 pairs.ts 注入 epsVel)

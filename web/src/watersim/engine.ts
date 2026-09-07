@@ -192,7 +192,10 @@ export class WaterEngine implements DropletHost {
   }
 
   endDrag(): void {
-    this.droplets.endDrag();
+    const i = this.droplets.dragIndex;
+    const reanchored = this.droplets.endDrag();
+    // 重锚定释放:拖拽造成的距离变化被桥吸收为新常态(连接保持,第三批②修订)
+    if (i >= 0 && reanchored) this.bridges.rebaseRestLengths(i);
   }
 
   /**
