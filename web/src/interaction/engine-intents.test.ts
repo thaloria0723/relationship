@@ -17,7 +17,8 @@ describe("引擎意图 API · 特性① 悬停水面微弱涟漪", () => {
     const { N, dx } = e.field;
     const ci = Math.round(0.5 / dx);
     const h = e.field.state.h[ci * N + ci]!;
-    expect(h).toBeLessThan(-5e-5); // 涟漪已注入(实测峰 ~0.1-0.3mm,含扩散衰减)
+    // 连续注入后中心相位正负交替,断言「存在毫米以下但可观测的波纹」
+    expect(Math.abs(h)).toBeGreaterThan(2e-4);
     expect(h).toBeGreaterThan(-0.003); // 微弱(远小于弹坑/戳点)
     e.setWaterHover(false, 0, 0);
     const e0 = e.field.energy();
@@ -45,16 +46,15 @@ describe("引擎意图 API · 特性② 悬停液滴浮出水面", () => {
 });
 
 describe("引擎意图 API · 特性③ 拖拽与缓慢回弹", () => {
-  it("拖拽跟随目标;释放后弹回抓取位", () => {
+  it("快拖(<1s)松手 → 缓慢弹回抓取位(规格③)", () => {
     const e = new WaterEngine(defaultParams);
     spawnAtRest(e, 0.4, 0.5);
     for (let s = 0; s < 10; s++) e.stepFixed();
     const homeX = e.droplets.state.x[0]!;
     e.beginDrag(0, 0.55, 0.5);
     e.moveDrag(0.55, 0.5);
-    for (let s = 0; s < Math.round(1.2 / DT); s++) e.stepFixed();
-    const xDrag = e.droplets.state.x[0]!;
-    expect(Math.abs(xDrag - 0.55)).toBeLessThan(0.01); // 跟随指针(振荡已衰减)
+    for (let s = 0; s < Math.round(0.5 / DT); s++) e.stepFixed(); // 拖住 0.5s < 1s
+    expect(Math.abs(e.droplets.state.x[0]! - 0.55)).toBeLessThan(0.01); // 跟随指针
     e.endDrag();
     let passedHome = false;
     for (let s = 0; s < Math.round(5 / DT); s++) {
@@ -65,6 +65,21 @@ describe("引擎意图 API · 特性③ 拖拽与缓慢回弹", () => {
     expect(e.droplets.state.returning[0]).toBe(0); // 回弹完成(锚点迁至原位)
     // 回弹完成后:钉扎半径内自由漂移(§12.2),残余波场上允许 ±1.5cm
     expect(Math.abs(e.droplets.state.x[0]! - homeX)).toBeLessThan(0.015);
+  });
+
+  it("拖住 ≥1s 松手 → 重锚定在松手处(关系网可布置)", () => {
+    const e = new WaterEngine(defaultParams);
+    spawnAtRest(e, 0.4, 0.5);
+    for (let s = 0; s < 10; s++) e.stepFixed();
+    e.beginDrag(0, 0.55, 0.5);
+    e.moveDrag(0.55, 0.5);
+    for (let s = 0; s < Math.round(1.2 / DT); s++) e.stepFixed(); // 拖住 1.2s ≥ 1s
+    expect(Math.abs(e.droplets.state.x[0]! - 0.55)).toBeLessThan(0.01);
+    e.endDrag();
+    expect(e.droplets.state.returning[0]).toBe(0); // 不回弹
+    for (let s = 0; s < Math.round(3 / DT); s++) e.stepFixed();
+    expect(Math.abs(e.droplets.state.x[0]! - 0.55)).toBeLessThan(0.02); // 留在原地
+    expect(e.droplets.state.anchorX[0]!).toBeCloseTo(e.droplets.state.x[0]!, 1); // 锚点已迁移
   });
 });
 

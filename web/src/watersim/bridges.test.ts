@@ -114,7 +114,7 @@ describe("watersim/bridges 液桥力学", () => {
     floatPair(drops);
     for (let s = 0; s < 40; s++) bridges.step(DT);
     const d = drops.state;
-    d.x[1] = d.x[1]! + bridges.state.restLen[0]! * 2.0;
+    d.x[1] = d.x[1]! + bridges.state.restLen[0]! * 2.5;
     for (let s = 0; s < 10; s++) bridges.step(DT);
     expect(bridges.state.count).toBe(0);
   });

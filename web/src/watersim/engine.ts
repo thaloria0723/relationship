@@ -58,6 +58,7 @@ export class WaterEngine implements DropletHost {
   private waterHoverX = 0;
   private waterHoverY = 0;
   private rippleAcc = 0;
+  private dropletRippleAcc = 0;
   private focusGroup: number[] = [];
   private readonly bridgeScratch = new Int32Array(64);
   private readonly pendingImpulses: PendingImpulse[] = [];
@@ -263,10 +264,29 @@ export class WaterEngine implements DropletHost {
         this.field.addVolumeSource(
           this.waterHoverX,
           this.waterHoverY,
-          0.015,
+          0.012,
           -this.params.rippleVolume,
           this.params.couplingClamp,
         );
+      }
+    }
+    // 1.6) 特性②:悬停液滴持续强化波纹(比①更强烈明显)
+    if (this.droplets.hovered >= 0) {
+      this.dropletRippleAcc += this.params.dt;
+      if (this.dropletRippleAcc >= this.params.ripplePeriod * 1.2) {
+        this.dropletRippleAcc -= this.params.ripplePeriod * 1.2;
+        const hd = this.droplets.state;
+        const hi = this.droplets.hovered;
+        if (hi < hd.count && hd.floating[hi] === 1) {
+          const hr = hd.r[hi]!;
+          this.field.addVolumeSource(
+            hd.x[hi]!,
+            hd.y[hi]!,
+            this.params.kernelSigma * hr,
+            -this.params.rippleVolume * 1.4 * ((hr / 0.02) ** 2),
+            this.params.couplingClamp,
+          );
+        }
       }
     }
     // 2) 液滴单体:空中积分 / 浮态力求解 + 动态源注入(§4.4)

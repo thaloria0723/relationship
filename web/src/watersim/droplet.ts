@@ -40,6 +40,11 @@ export class DropletSystem {
   dragIndex = -1;
   dragTX = 0;
   dragTY = 0;
+  /** 拖拽起始位置(重锚定判定位移用) */
+  dragStartX = 0;
+  dragStartY = 0;
+  /** 拖拽累计步数(重锚定判定时长用) */
+  dragSteps = 0;
 
   private readonly grad = new Float32Array(2);
 
@@ -170,6 +175,9 @@ export class DropletSystem {
     d.returning[i] = 0;
     this.dragTX = x;
     this.dragTY = y;
+    this.dragStartX = d.x[i]!;
+    this.dragStartY = d.y[i]!;
+    this.dragSteps = 0;
   }
 
   setDragTarget(x: number, y: number): void {
@@ -182,7 +190,22 @@ export class DropletSystem {
     if (i < 0) return;
     const d = this.state;
     d.drag[i] = 0;
-    d.returning[i] = 1; // home 保持 beginDrag 时的抓取位 → 释放后缓慢弹回原位
+    // 拖拽双模式(调优 #2):拖住 ≥1.0s 或位移 ≥0.15m → 重锚定在松手处
+    // (用户布置关系网);快拖 → 按规格③缓慢弹回抓取位
+    const held = this.dragSteps * this.params.dt >= 1.0;
+    const moved =
+      Math.hypot(d.x[i]! - this.dragStartX, d.y[i]! - this.dragStartY) >= 0.15;
+    d.homeX[i] = d.x[i]!;
+    d.homeY[i] = d.y[i]!;
+    if (held || moved) {
+      d.anchorX[i] = d.x[i]!;
+      d.anchorY[i] = d.y[i]!;
+      d.returning[i] = 0;
+    } else {
+      d.homeX[i] = this.dragStartX;
+      d.homeY[i] = this.dragStartY;
+      d.returning[i] = 1;
+    }
     this.dragIndex = -1;
   }
 
@@ -285,6 +308,7 @@ export class DropletSystem {
           d.vx[i]! + ((this.dragTX - x) * p.dragFollow - p.dragDamp * d.vx[i]!) * dt;
         d.vy[i] =
           d.vy[i]! + ((this.dragTY - y) * p.dragFollow - p.dragDamp * d.vy[i]!) * dt;
+        this.dragSteps++;
         skipEnv = true;
       } else if (d.returning[i] === 1) {
         const rdx = d.homeX[i]! - x;

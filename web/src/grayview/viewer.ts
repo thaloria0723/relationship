@@ -69,6 +69,7 @@ export function mountGrayViewer(
   const btnWire = el<HTMLButtonElement>("gray-btn-wire");
   const btnDrop = el<HTMLButtonElement>("gray-btn-drop");
   const btnPair = el<HTMLButtonElement>("gray-btn-pair");
+  const btnNet = el<HTMLButtonElement>("gray-btn-net");
 
   const showError = (message: string): void => {
     hudError.textContent = `启动失败:${message}`;
@@ -310,8 +311,8 @@ export function mountGrayViewer(
       const n2x = uy * n1z - uz * n1y;
       const n2y = uz * n1x - ux * n1z;
       const n2z = ux * n1y - uy * n1x;
-      const rEnd = 0.8 * Math.min(d.r[ia]!, d.r[ib]!);
-      const rNeck = 0.45 * rEnd;
+      const rEnd = 1.0 * Math.min(d.r[ia]!, d.r[ib]!);
+      const rNeck = 0.62 * rEnd;
       for (let s = 0; s <= BRIDGE_LEN; s++) {
         const t = s / BRIDGE_LEN;
         const rr = rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5;
@@ -556,6 +557,21 @@ export function mountGrayViewer(
     engine.spawnDroplet(cx - (r1 + gap / 2), cy, z0 + r1, r1);
     engine.spawnDroplet(cx + (r2 + gap / 2), cy, z0 + r2, r2);
   });
+  // 网络场景(调优 #6):中心+六边形 7 滴确定性布点,辐射桥+环桥全成网
+  btnNet.addEventListener("click", () => {
+    const rc = 0.022;
+    const rr = 0.016;
+    const ring = 0.034; // 六边形半径:中心-辐条与相邻环边均落在桥接区间
+    const z0 = engine.field.totalHeight(0.5, 0.5) + params.dropHeight;
+    engine.spawnDroplet(0.5, 0.5, z0 + rc, rc);
+    for (let k = 0; k < 6; k++) {
+      const ang = (k / 6) * Math.PI * 2;
+      const x = 0.5 + Math.cos(ang) * ring;
+      const y = 0.5 + Math.sin(ang) * ring;
+      const r = k % 2 === 0 ? rr : rr * 0.82;
+      engine.spawnDroplet(x, y, engine.field.totalHeight(x, y) + params.dropHeight + r, r);
+    }
+  });
 
   // ---- 模块②指针适配(DOM → 采样;Esc = 焦点退出) ----
   const dom = renderer.domElement;
@@ -679,7 +695,7 @@ export function mountGrayViewer(
               const ccx = cxs / focusGroup.length - half;
               const ccz = czs / focusGroup.length - half;
               startCamAnim(
-                new THREE.Vector3(ccx, 0.95, ccz + 0.02),
+                new THREE.Vector3(ccx, 0.3, ccz + 0.02),
                 new THREE.Vector3(ccx, 0, ccz),
                 0.6,
               );
@@ -729,13 +745,14 @@ export function mountGrayViewer(
       captionNode.textContent = text ?? "";
       captionNode.style.display = text ? "block" : "none";
     }
+    controls.update();
+    camera.updateMatrixWorld(true);
     if (render) {
       bakeTotal();
       updateSurface();
       updateWire();
       syncDroplets();
       syncBridges(frameDt);
-      controls.update();
       renderer.render(scene, camera);
     }
 
@@ -769,15 +786,20 @@ export function mountGrayViewer(
     renderer.setAnimationLoop(() => tick(true));
   });
 
-  renderer.setAnimationLoop(() => tick(true));
+  let lastRafAt = performance.now();
+  renderer.setAnimationLoop(() => {
+    lastRafAt = performance.now();
+    tick(true);
+  });
 
-  // 后台心跳(§4 运行时):rAF 在隐藏标签中暂停;隐藏时以 worker 拍子
-  // 只推进物理(渲染跳过),demo 时间线与灰模验收不因标签切换而冻结
+  // 后台心跳(§4 运行时):隐藏标签与窗口遮挡都会停 rAF(document.hidden 检测
+  // 不到遮挡);worker 拍子发现 rAF 断供 >250ms 即接管,只推进物理(渲染跳过),
+  // demo 时间线与灰模验收不因标签切换/遮挡而冻结
   const heartbeat = new Worker(new URL("./heartbeat.ts", import.meta.url), {
     type: "module",
   });
   heartbeat.onmessage = () => {
-    if (document.hidden) tick(false);
+    if (performance.now() - lastRafAt > 250) tick(false);
   };
 
   // dev 探针:控制台可 (window as any).__gray.engine / .screenOf(i) 观测引擎态
@@ -787,6 +809,12 @@ export function mountGrayViewer(
     },
     get controller() {
       return controller;
+    },
+    get camera() {
+      return camera;
+    },
+    get camTarget() {
+      return controls.target;
     },
     screenOf(i: number): [number, number, number] {
       const d = engine.droplets.state;
