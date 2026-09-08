@@ -80,6 +80,7 @@ export class DropletSystem {
       drag: new Uint8Array(max),
       returning: new Uint8Array(max),
       lev: new Uint8Array(max),
+      curve: new Uint8Array(max),
     };
   }
 
@@ -111,6 +112,7 @@ export class DropletSystem {
     d.drag[i] = 0;
     d.returning[i] = 0;
     d.lev[i] = 0;
+    d.curve[i] = 0;
     d.count = i + 1;
     return true;
   }
@@ -145,6 +147,7 @@ export class DropletSystem {
       d.drag[i] = d.drag[last]!;
       d.returning[i] = d.returning[last]!;
       d.lev[i] = d.lev[last]!;
+      d.curve[i] = d.curve[last]!;
     }
     d.count = last;
   }
@@ -233,6 +236,14 @@ export class DropletSystem {
     }
   }
 
+  /** 焦点退场曲线标志(第五批):置位期间本系统跳过该滴常规物理分支,
+   *  位置/浸深由引擎编舞逐步写入;清除时恢复漂浮态常规求解 */
+  setCurvedReturn(i: number, on: boolean): void {
+    const d = this.state;
+    if (i < 0 || i >= d.count) return;
+    d.curve[i] = on ? 1 : 0;
+  }
+
   /** 推进一颗(dt = 固定步长) */
   update(dt: number): void {
     const { params: p, field, state: d, grad } = this;
@@ -243,6 +254,13 @@ export class DropletSystem {
       const r = d.r[i]!;
       const x = d.x[i]!;
       const y = d.y[i]!;
+
+      // ---------- 焦点退场曲线(第五批):引擎编舞接管运动学,
+      //          跳过常规物理(防浸深弛豫源项在飞行途中持续注入);保留形状弹簧 ----------
+      if (d.curve[i] === 1) {
+        this.stepShapeSpring(i, dt);
+        continue;
+      }
 
       // ---------- 空中段:显式积分 z、vz(§4.2) ----------
       if (d.floating[i] === 0) {

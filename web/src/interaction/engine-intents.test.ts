@@ -115,6 +115,8 @@ describe("引擎意图 API · 特性④ 焦点模式(悬浮+切桥)", () => {
     expect(d.lev[0]).toBe(0);
     expect(d.lev[1]).toBe(0);
     expect(d.floating[0]).toBe(0); // 改走坠落,重新入水触发溅落
+    // 第五批:断桥恢复移至退场编舞收尾(成员曲线回位完成后),而非退出瞬间
+    for (let s = 0; s < Math.round(2.0 / DT); s++) e.stepFixed();
     expect(e.bridges.state.cut[b0!]).toBe(0);
     expect(e.bridges.state.cut[b1!]).toBe(0);
   });

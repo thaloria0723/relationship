@@ -144,6 +144,22 @@ export type WaterSimParams = {
   /** 焦点悬浮高度(m,液滴中心离水面) */
   levitateHeight: number;
 
+  // ---- 焦点模式编舞(第五批,2026-09-07;委托方三需求) ----
+  /** 包围圈轨道角速度(rad/s;正值 = 俯视顺时针——viewer 自 +Y 俯视,engine 平面
+   *  逆时针即屏幕顺时针)。包围圈液滴绕中心滴的匀角速旋转 */
+  focusOrbitOmega: number;
+  /** 等长环半径收敛速率(s⁻¹,一阶):spoke 强制等长后,成员水平半径朝 L 收敛;
+   *  0 = 不收敛(只旋转) */
+  focusOrbitRadialK: number;
+  /** 聚焦期中心滴下方圈状涟漪注入周期(秒;经弹坑发射器分步展开成扩散圆环) */
+  focusRipplePeriod: number;
+  /** 聚焦期圈状涟漪单次注入体积(m³;×(r/0.02)² 尺度归一) */
+  focusRippleVolume: number;
+  /** 退场曲线回位时长(秒):退出聚焦后成员沿贝塞尔曲线从环上回到首次落点 */
+  focusReturnDur: number;
+  /** 聚焦相机取景余量(米):等长环半径之外再留的入画边距(viewer 相机拟合消费) */
+  focusFitMargin: number;
+
   // ---- §5.5 耦合(M2 接入) ----
   /** 凹陷核宽度(×r,3σ 截断、归一化 ∫=−V_sub,范围 0.8–2) */
   kernelSigma: number;
@@ -242,6 +258,14 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   hoverRippleGain: 6,
   levitateHeight: 0.08,
 
+  /** 焦点编舞(第五批):0.4 rad/s ≈ 16s 一圈(缓缓);涟漪峰深 ~2mm 清晰可见 */
+  focusOrbitOmega: 0.4,
+  focusOrbitRadialK: 3,
+  focusRipplePeriod: 0.45,
+  focusRippleVolume: 4e-6,
+  focusReturnDur: 1.0,
+  focusFitMargin: 0.035,
+
   /** 凹陷核宽度(×r,3σ 截断;默认 0.8 为验收整改裁决 B:深陡可见,范围下限,§10 预案) */
   kernelSigma: 0.8,
   impulseGain: 1.0,
@@ -318,6 +342,12 @@ const RANGES: readonly (readonly [keyof WaterSimParams, number, number])[] = [
   ["rippleVolume", 0, 1e-5],
   ["hoverRippleGain", 0, 20],
   ["levitateHeight", 0.01, 0.3],
+  ["focusOrbitOmega", 0.05, 2],
+  ["focusOrbitRadialK", 0, 20],
+  ["focusRipplePeriod", 0.05, 2],
+  ["focusRippleVolume", 0, 1e-4],
+  ["focusReturnDur", 0.2, 3],
+  ["focusFitMargin", 0.005, 0.2],
 ];
 
 /**

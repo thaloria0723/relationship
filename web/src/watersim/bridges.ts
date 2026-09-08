@@ -13,6 +13,9 @@
 //   b) 生存期 0.2s 复检:侵入持续 > grace → 断桥,双端进冷却防抖
 //      (断桥同时清 pending,防冷却结束后凭旧计时瞬间重桥);
 //   c) 交换删除重映射。
+// + 焦点守护(第五批,委托方聚焦三需求):聚焦期与退场编舞期,组相关桥受守护
+//   (不张力/不断桥/不复检侵入)、成桥扫描冻结、组内滴豁免侵入第三方——
+//   「暂时断裂的液桥在退出后恢复连接」按构造成立(开关由引擎设置)。
 // 确定性:预分配池、固定顺序扫描、无对象分配热路径。
 // ============================================================
 
@@ -28,6 +31,16 @@ export class BridgeSystem {
   /** 累计成桥/断桥次数(测试与 HUD 观测) */
   formedCount = 0;
   brokenCount = 0;
+
+  // ---- 焦点模式守护(第五批;开关由 WaterEngine 持有焦点状态时设置) ----
+  /** 成桥扫描冻结:聚焦期与退场编舞期不形成新桥(悬浮/旋转/曲线中的几何不是网络语义) */
+  formationFrozen = false;
+  /** 受守护桥槽位:张力/端点失效断桥/侵入复检全部暂停——聚焦编舞期间组相关桥
+   *  按构造保持存在(退出时「暂时断裂的液桥恢复连接」的前提) */
+  readonly guardSlot: Uint8Array;
+  /** 侵入第三方豁免(液滴索引级):组内滴悬浮/旋转/回场飞行时其 2D 轴向投影
+   *  不应触发无关桥的侵入断桥(侵入判定不含高度) */
+  readonly intruderExempt: Uint8Array;
 
   /** 成桥等待累计:键 = i·maxN + j(i<j),O(n²) 预分配 */
   private readonly pending: Float32Array;
@@ -49,6 +62,8 @@ export class BridgeSystem {
       cut: new Uint8Array(slots),
       intrudeT: new Float32Array(slots),
     };
+    this.guardSlot = new Uint8Array(slots);
+    this.intruderExempt = new Uint8Array(n);
     this.pending = new Float32Array(n * n);
   }
 
@@ -58,7 +73,7 @@ export class BridgeSystem {
    * 2) 生存期:张力持距 / 侵入复检(无体积流动,第四批)
    */
   step(dt: number): void {
-    if (!this.params.mergeEnabled) {
+    if (!this.params.mergeEnabled && !this.formationFrozen) {
       this.scanFormation(dt);
     }
     this.stepActive(dt);
@@ -141,6 +156,8 @@ export class BridgeSystem {
     for (let k = s.count - 1; k >= 0; k--) {
       const i = s.a[k]!;
       const j = s.b[k]!;
+      // 焦点守护(第五批):编舞期间组相关桥不施张力、不断桥、不复检侵入
+      if (this.guardSlot[k] === 1) continue;
       // 端点失效(被移除/非漂浮)→ 断桥
       if (i >= d.count || j >= d.count || d.floating[i] !== 1 || d.floating[j] !== 1) {
         this.breakBridge(k);
@@ -251,6 +268,7 @@ export class BridgeSystem {
     const uy = (d.y[j]! - yi) / dist;
     for (let k = 0; k < n; k++) {
       if (k === i || k === j || d.floating[k] !== 1) continue;
+      if (this.intruderExempt[k] === 1) continue; // 焦点编舞滴豁免(第五批)
       const px = d.x[k]! - xi;
       const py = d.y[k]! - yi;
       let t = px * ux + py * uy;

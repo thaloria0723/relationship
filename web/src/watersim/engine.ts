@@ -15,6 +15,25 @@ import type { EngineStats } from "./types";
 /** 弹坑展开步数(裁决 D′):~67ms,每步峰值 ≪ couplingClamp,数值柔和拒平顶 */
 const CRATER_STEPS = 10;
 
+/** 焦点退场曲线(第五批):成员沿二次贝塞尔(水平)+ u² 缓入(垂直)回首次落点 */
+interface FocusExitCurve {
+  i: number;
+  /** 起点(环上位置) */
+  x0: number;
+  y0: number;
+  z0: number;
+  /** 贝塞尔控制点(弦中点 + 顺轨道切向垂直偏移 → 顺势螺旋回位) */
+  cx: number;
+  cy: number;
+  /** 终点 = 该滴首次落点(出生锚点)与落水高度 */
+  x1: number;
+  y1: number;
+  z1: number;
+  /** 已进行/总时长(秒) */
+  t: number;
+  dur: number;
+}
+
 interface PendingImpulse {
   x: number;
   y: number;
@@ -60,6 +79,21 @@ export class WaterEngine implements DropletHost {
   private rippleAcc = 0;
   private dropletRippleAcc = 0;
   private focusGroup: number[] = [];
+  // ---- 焦点模式编舞状态(第五批) ----
+  /** off = 无焦点;hold = 聚焦保持(旋转/涟漪);out = 退场编舞(曲线回位) */
+  private focusPhase: "off" | "hold" | "out" = "off";
+  private focusCenter = -1;
+  /** 等长环半径(= 等长后 spoke 桥长,viewer 相机拟合用) */
+  private focusRingLen = 0;
+  /** 中心直连桥槽位与进入时桥长(退出时还原) */
+  private focusSpokes: number[] = [];
+  private savedSpokeRestLen: number[] = [];
+  /** 进入时切断的非 spoke 组相关桥槽位(收尾时恢复连接) */
+  private cutSlots: number[] = [];
+  /** 守护中的桥槽位(spokes ∪ cutSlots;收尾时清零) */
+  private guardSlots: number[] = [];
+  private focusRippleAcc = 0;
+  private exitCurves: FocusExitCurve[] = [];
   private readonly bridgeScratch = new Int32Array(64);
   private readonly pendingImpulses: PendingImpulse[] = [];
   private readonly pendingSpawns: PendingSpawn[] = [];
@@ -199,10 +233,15 @@ export class WaterEngine implements DropletHost {
   }
 
   /**
-   * 特性④:焦点模式。分组 G = {i} ∪ 直连桥邻居;G 内液滴悬浮,
-   * 跨组桥(guest 端在组外)临时切断。返回组成员(viewer 相机/高亮用)。
+   * 特性④:焦点模式(第五批编舞版)。
+   * 分组 G = {i} ∪ 直连桥邻居;G 内液滴悬浮。需求①:中心直连桥(spoke)restLen
+   * 强制等长为 L(= 最长 spoke 距,只外推不内拉),viewer 以 L 拟合相机使包围圈
+   * 入画、中心滴居屏幕正中。需求②:G 内非 spoke 桥(包围圈内部 + 跨界)全部
+   * 暂时切断;聚焦期成桥扫描冻结、组相关桥受守护、组内滴豁免侵入第三方。
+   * 返回组成员(viewer 相机/高亮用)。
    */
   enterFocus(i: number): number[] {
+    if (this.focusPhase !== "off") this.forceFinalizeFocus();
     const d = this.droplets.state;
     if (i < 0 || i >= d.count) return [];
     const group = [i];
@@ -222,28 +261,224 @@ export class WaterEngine implements DropletHost {
       }
     }
     this.focusGroup = group;
+    this.focusCenter = i;
+    this.focusPhase = "hold";
+    this.focusRippleAcc = this.params.focusRipplePeriod; // 进入即先起一圈涟漪
     for (const m of group) this.droplets.setLevitate(m, true);
-    // 跨组桥切断(退出时恢复)
+    // 需求①:spoke 桥长强行一致(取最长 spoke 距,只外推;下限 = 持距下限)
+    this.focusSpokes = [];
+    this.savedSpokeRestLen = [];
+    let ring = 0;
+    for (let k = 0; k < nb; k++) {
+      const slot = scratch[k]!;
+      const a = this.bridges.state.a[slot]!;
+      const b = this.bridges.state.b[slot]!;
+      const other = a === i ? b : a;
+      const dist = Math.hypot(d.x[other]! - d.x[i]!, d.y[other]! - d.y[i]!);
+      const minHold = (d.r[i]! + d.r[other]!) * (1 + this.params.bridgeRestGap);
+      ring = Math.max(ring, dist, minHold);
+      this.focusSpokes.push(slot);
+      this.savedSpokeRestLen.push(this.bridges.state.restLen[slot]!);
+    }
+    this.focusRingLen = ring;
+    for (const slot of this.focusSpokes) this.bridges.state.restLen[slot] = ring;
+    // 需求②:非 spoke 组相关桥(包围圈内部 + 跨界)全部暂时切断
+    this.cutSlots = [];
     for (let k = 0; k < this.bridges.state.count; k++) {
       const a = this.bridges.state.a[k]!;
       const b = this.bridges.state.b[k]!;
       const aIn = seen.has(a);
       const bIn = seen.has(b);
-      if (aIn !== bIn) this.bridges.setCut(k, true);
+      const isSpoke = (a === i || b === i) && aIn && bIn;
+      if (!isSpoke && (aIn || bIn)) {
+        this.bridges.setCut(k, true);
+        this.cutSlots.push(k);
+      }
     }
+    // 编舞期守护:成桥冻结;组相关桥不张力/不断桥/不复检侵入(退出后恢复连接的前提);
+    // 组内滴悬浮/旋转/回场飞行,其 2D 投影不作为无关桥的侵入第三方
+    this.bridges.formationFrozen = true;
+    this.guardSlots = [...this.focusSpokes, ...this.cutSlots];
+    for (const k of this.guardSlots) this.bridges.guardSlot[k] = 1;
+    for (const m of group) this.bridges.intruderExempt[m] = 1;
     return group.slice();
   }
 
+  /**
+   * 需求③:退出聚焦。中心滴水平归位到首次落点(出生锚点)后改走空中段自由落体;
+   * 成员记录退场曲线(引擎逐步编舞),全部到位后 finalizeFocusExit 恢复断桥与
+   * 原桥长。恢复刻意延后到编舞收尾:立即恢复会让跨组桥在成员尚在环上时把组外
+   * 端拉离原位。
+   */
   exitFocus(): void {
-    for (const m of this.focusGroup) this.droplets.setLevitate(m, false);
-    for (let k = 0; k < this.bridges.state.count; k++) {
-      this.bridges.setCut(k, false);
+    if (this.focusPhase !== "hold") return;
+    const d = this.droplets.state;
+    const c = this.focusCenter;
+    this.focusPhase = "out";
+    // 中心:直接自由落体回首落点(悬浮期位置≈进入位置≈锚点,归位是毫米级校正)
+    this.droplets.setLevitate(c, false);
+    d.x[c] = d.anchorX[c]!;
+    d.y[c] = d.anchorY[c]!;
+    d.vx[c] = 0;
+    d.vy[c] = 0;
+    // 成员:逐滴记录贝塞尔曲线,stepFixed 中推进
+    this.exitCurves = [];
+    const ccx = d.x[c]!;
+    const ccy = d.y[c]!;
+    for (const m of this.focusGroup) {
+      if (m === c) continue;
+      d.lev[m] = 0;
+      this.droplets.setCurvedReturn(m, true);
+      const x0 = d.x[m]!;
+      const y0 = d.y[m]!;
+      const z0 = d.z[m]!;
+      const x1 = d.anchorX[m]!;
+      const y1 = d.anchorY[m]!;
+      // 控制点 = 弦中点 + 垂直偏移(偏转符号与轨道切向同向 → 顺势螺旋回位)
+      const mx = (x0 + x1) / 2;
+      const my = (y0 + y1) / 2;
+      let px = -(y1 - y0);
+      let py = x1 - x0;
+      const pl = Math.hypot(px, py);
+      if (pl < 1e-9) {
+        px = 1;
+        py = 0;
+      } else {
+        px /= pl;
+        py /= pl;
+      }
+      const sgn = px * -(y0 - ccy) + py * (x0 - ccx) >= 0 ? 1 : -1;
+      const bulge = Math.max(0.25 * Math.hypot(x1 - x0, y1 - y0), 0.01);
+      const r = d.r[m]!;
+      this.exitCurves.push({
+        i: m,
+        x0,
+        y0,
+        z0,
+        cx: mx + sgn * px * bulge,
+        cy: my + sgn * py * bulge,
+        x1,
+        y1,
+        z1: this.field.totalHeight(x1, y1) + r * 0.95,
+        t: 0,
+        dur: this.params.focusReturnDur,
+      });
     }
-    this.focusGroup = [];
   }
 
   getFocusGroup(): readonly number[] {
     return this.focusGroup;
+  }
+
+  /** 焦点中心滴索引(无焦点 = −1;viewer 相机对中用) */
+  getFocusCenter(): number {
+    return this.focusCenter;
+  }
+
+  /** 等长环半径(= 等长 spoke 桥长;viewer 相机按此拟合包围圈入画) */
+  getFocusRingLen(): number {
+    return this.focusRingLen;
+  }
+
+  /** 需求②:聚焦期包围圈旋转 + 半径向等长环收敛(速度导向;位置由常规悬浮段积分) */
+  private applyFocusOrbit(dt: number): void {
+    const d = this.droplets.state;
+    const c = this.focusCenter;
+    if (c < 0 || c >= d.count) return;
+    const cx = d.x[c]!;
+    const cy = d.y[c]!;
+    const omega = this.params.focusOrbitOmega;
+    const kr = this.params.focusOrbitRadialK;
+    const L = this.focusRingLen;
+    for (const m of this.focusGroup) {
+      if (m === c || m >= d.count) continue;
+      const ex = d.x[m]! - cx;
+      const ey = d.y[m]! - cy;
+      const r = Math.hypot(ex, ey);
+      if (r < 1e-6) continue;
+      const radial = kr > 0 ? kr * (L - r) : 0;
+      // engine 平面逆时针(ω>0)= 俯视屏幕顺时针(需求②)
+      d.vx[m] = (radial * ex) / r - omega * ey;
+      d.vy[m] = (radial * ey) / r + omega * ex;
+    }
+  }
+
+  /** 需求③:推进退场曲线;单滴到位即恢复漂浮态并经弹坑通道溅落 */
+  private advanceExitCurves(dt: number): void {
+    const d = this.droplets.state;
+    for (let n = this.exitCurves.length - 1; n >= 0; n--) {
+      const cv = this.exitCurves[n]!;
+      cv.t += dt;
+      const u = Math.min(1, cv.t / cv.dur);
+      const e = u * u * (3 - 2 * u); // smoothstep:水平缓入缓出
+      const w0 = (1 - e) * (1 - e);
+      const w1 = 2 * (1 - e) * e;
+      const w2 = e * e;
+      const i = cv.i;
+      d.x[i] = w0 * cv.x0 + w1 * cv.cx + w2 * cv.x1;
+      d.y[i] = w0 * cv.y0 + w1 * cv.cy + w2 * cv.y1;
+      d.z[i] = cv.z0 + (cv.z1 - cv.z0) * u * u; // u²:起步缓、临近落水加速
+      d.vx[i] = 0;
+      d.vy[i] = 0;
+      d.vz[i] = 0;
+      if (u >= 1) {
+        const r = d.r[i]!;
+        const vzLand = (2 * (cv.z0 - cv.z1)) / cv.dur; // u² 末速
+        const tContact = r / Math.max(vzLand, 0.1);
+        this.scheduleImpact(
+          d.x[i]!,
+          d.y[i]!,
+          IMPACT_SIGMA_RATIO * r,
+          -this.params.impulseGain * r * r * vzLand * tContact,
+        );
+        d.d[i] = 0.05 * r;
+        d.z[i] = this.field.totalHeight(d.x[i]!, d.y[i]!) + (r - d.d[i]!);
+        this.droplets.setCurvedReturn(i, false);
+        this.exitCurves[n] = this.exitCurves[this.exitCurves.length - 1]!;
+        this.exitCurves.pop();
+      }
+    }
+  }
+
+  /** 退场收尾:恢复暂时切断的桥与原 spoke 桥长,解除守护/冻结/豁免 */
+  private finalizeFocusExit(): void {
+    for (const k of this.cutSlots) this.bridges.setCut(k, false);
+    for (let n = 0; n < this.focusSpokes.length; n++) {
+      this.bridges.state.restLen[this.focusSpokes[n]!] = this.savedSpokeRestLen[n]!;
+    }
+    for (const k of this.guardSlots) this.bridges.guardSlot[k] = 0;
+    for (const m of this.focusGroup) this.bridges.intruderExempt[m] = 0;
+    this.bridges.formationFrozen = false;
+    this.exitCurves = [];
+    this.focusGroup = [];
+    this.focusSpokes = [];
+    this.savedSpokeRestLen = [];
+    this.cutSlots = [];
+    this.guardSlots = [];
+    this.focusCenter = -1;
+    this.focusRingLen = 0;
+    this.focusPhase = "off";
+  }
+
+  /** 异常路径收尾(编舞中重进聚焦/宿主复用):未完成曲线的成员就地归位锚点 */
+  private forceFinalizeFocus(): void {
+    if (this.focusPhase === "off") return;
+    const d = this.droplets.state;
+    for (const cv of this.exitCurves) {
+      const i = cv.i;
+      this.droplets.setCurvedReturn(i, false);
+      d.x[i] = d.anchorX[i]!;
+      d.y[i] = d.anchorY[i]!;
+      d.d[i] = 0.05 * d.r[i]!;
+      d.z[i] = this.field.totalHeight(d.x[i]!, d.y[i]!) + d.r[i]! - d.d[i]!;
+      d.vx[i] = 0;
+      d.vy[i] = 0;
+      d.vz[i] = 0;
+    }
+    for (const m of this.focusGroup) {
+      if (m >= 0 && m < d.count && d.lev[m] === 1) this.droplets.setLevitate(m, false);
+    }
+    this.finalizeFocusExit();
   }
 
   /** 恰好执行一个固定步(确定性测试与单步调试用) */
@@ -292,8 +527,37 @@ export class WaterEngine implements DropletHost {
         }
       }
     }
+    // 1.7) 特性④聚焦(第五批):中心滴下方周期圈状涟漪(弹坑通道 → 扩散圆环)
+    if (this.focusPhase === "hold") {
+      this.focusRippleAcc += this.params.dt;
+      if (this.focusRippleAcc >= this.params.focusRipplePeriod) {
+        this.focusRippleAcc -= this.params.focusRipplePeriod;
+        const fd = this.droplets.state;
+        const fc = this.focusCenter;
+        if (fc >= 0 && fc < fd.count) {
+          const rC = fd.r[fc]!;
+          this.scheduleImpact(
+            fd.x[fc]!,
+            fd.y[fc]!,
+            this.params.kernelSigma * rC,
+            -this.params.focusRippleVolume * (rC / 0.02) ** 2,
+          );
+        }
+      }
+    }
     // 2) 液滴单体:空中积分 / 浮态力求解 + 动态源注入(§4.4)
     this.droplets.update(this.params.dt);
+    // 2.15) 焦点编舞(第五批):hold = 包围圈旋转;out = 退场曲线;全员到位即收尾
+    if (this.focusPhase === "hold") {
+      this.applyFocusOrbit(this.params.dt);
+    } else if (this.focusPhase === "out") {
+      const centerHome =
+        this.focusCenter < 0 ||
+        this.focusCenter >= this.droplets.state.count ||
+        this.droplets.state.floating[this.focusCenter] === 1;
+      this.advanceExitCurves(this.params.dt);
+      if (this.exitCurves.length === 0 && centerHome) this.finalizeFocusExit();
+    }
     // 2.2) 液滴间(M3):碰撞冲量+去穿透 → 毛细吸引 → 聚合判定与执行
     this.pairs.step(this.params.dt);
     // 2.4) 液桥(任务①):成桥扫描 + 张力/侵入治理(网络模式;无体积流动,第四批)
