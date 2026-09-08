@@ -204,10 +204,10 @@ export const RENDER_PARAMS = {
   waterAbsorb: [2.2, 0.75, 0.45] as const,
   /** 液桥常态透明度(委托方指定:极度淡化 30%) */
   bridgeOpacity: 0.3,
-  /** 液桥高亮透明度(变亮) */
-  bridgeHiOpacity: 0.78,
-  /** 高亮加粗:半径 ×(1 + 此值) */
-  bridgeHiThicken: 0.6,
+  /** 液桥高亮透明度(变亮,减弱) */
+  bridgeHiOpacity: 0.55,
+  /** 高亮加粗:半径 ×(1 + 此值)(减弱) */
+  bridgeHiThicken: 0.35,
   /** 液滴内体压暗(委托方「颜色较深」的量化) */
   dropletDarken: 0.5,
   /** 水面 GGX 粗糙度(物理量级:清水低粗糙) */

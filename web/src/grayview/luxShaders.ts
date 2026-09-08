@@ -110,14 +110,17 @@ vec3 shadeBottom(vec2 uv, vec2 wxz) {
   float lap;
   heightDerivs(uv, slope, lap);
   float ca = clamp(lap * uCausticScale * CAUSTIC_GAIN, -0.8, 3.0);
+  // 液滴软影:取最近一颗的影响(非累乘,避免落滴越多水底越暗)
   float shadow = 1.0;
+  float maxInfluence = 0.0;
   for (int i = 0; i < MAXD; i++) {
     float on = step(float(i) + 0.5, uDropCountF);
     float dd = distance(wxz, uDropPos[i]);
     float r = max(uDropRad[i], 1e-4);
-    shadow *= 1.0 - uShadow * smoothstep(r * 0.6, r * 2.2, dd) * on;
+    float infl = uShadow * smoothstep(r * 2.2, r * 0.6, dd) * on;
+    maxInfluence = max(maxInfluence, infl);
   }
-  shadow = clamp(shadow, 0.0, 1.0);
+  shadow = 1.0 - maxInfluence;
   vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
   vec3 col = uBottomAlbedo * light * shadow * (1.0 + max(ca, 0.0) * 2.0);
   col *= 1.0 + min(ca, 0.0); // 凸脊发散 → 压暗
@@ -167,7 +170,7 @@ void main() {
 }
 `;
 
-/** 水面片元:Fresnel 反射 + Snell 折射看水底 + Beer–Lambert + GGX 高光 */
+/** 水面片元:透明式浅蓝水面(Fresnel 反射 + Snell 折射看水底 + 焦散 + GGX 高光) */
 export const LUX_SURFACE_FRAG = [
   COMMON_UNIFORMS,
   COMMON_HELPERS,
@@ -192,18 +195,24 @@ void main() {
   vec3 transmit = exp(-uAbsorb * pathLen);
   float tAvg = dot(transmit, vec3(0.3333));
   vec3 body = bottom * transmit + uWaterBody * (1.0 - tAvg) * 3.0;
+  // 透明式水面:浅蓝 tint + 折射水底混合,低 alpha 让水底 mesh 透过可见
+  vec3 lightBlueTint = vec3(0.6, 0.8, 0.92);
   vec3 col = mix(body, env, F);
+  col = mix(col, lightBlueTint, 0.35); // 浅蓝倾向
   col += uSunColor * ggxSpec(n, v, uSunDir, uRough) * uGlint;
   col = applyGrade(col);
   col = applyMist(col, vWorld);
   col *= mix(1.0, 0.42, uDim);
-  gl_FragColor = vec4(col, 1.0);
+  // 透明度:掠射角更不透明(Fresnel),垂直俯视最透明(看水底)
+  float alpha = mix(0.22, 0.85, F);
+  gl_FragColor = vec4(col, alpha);
 }
 `,
 ].join("\n");
 
-/** 液滴:水球(深色内体 + Fresnel 边缘 + GGX 高光);实例压扁法线修正 */
+/** 液滴:扁平透镜状水滴(上凸下平球冠 + 下平圆面);实例 y 向缩放 LENS_H·(1−ε) */
 export const LUX_DROPLET_VERT = /* glsl */ `
+#define LENS_H 0.3
 attribute float aEps;
 varying vec3 vN;
 varying vec3 vW;
@@ -213,8 +222,9 @@ void main() {
   #ifdef USE_INSTANCING_COLOR
     vTint = instanceColor;
   #endif
-  // 实例变换 = 平移 · 缩放(r, r(1−ε), r),无旋转 → 法线修正 = y 除以 (1−ε)
-  vN = normalize(vec3(normal.x, normal.y / max(1.0 - aEps, 0.25), normal.z));
+  // 实例变换 = 平移 · 缩放(r, r·LENS_H·(1−ε), r),无旋转 →
+  // 法线修正 = y 除以 LENS_H·(1−ε)(透镜厚度方向非均匀缩放)
+  vN = normalize(vec3(normal.x, normal.y / max(LENS_H * (1.0 - aEps), 0.075), normal.z));
   vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
   vW = wp.xyz;
   gl_Position = projectionMatrix * viewMatrix * wp;
@@ -285,11 +295,77 @@ void main() {
   vec3 body = (uWaterBody * 1.5 + vec3(0.04, 0.08, 0.1)) * lit * 1.6;
   vec3 col = body + skyColor(reflect(-v, n)) * (F * 1.2 + 0.45);
   col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint;
-  col = mix(col, col * 1.7 + uSunColor * 0.12, vEmph); // 高亮:变亮
+  col = mix(col, col * 1.3, vEmph); // 高亮:温和变亮(减弱)
   col = applyGrade(col);
   col = applyMist(col, vW);
   float alpha = mix(uBridgeOpacity, uBridgeHiOpacity, vEmph); // 30% → 高亮
   gl_FragColor = vec4(col, alpha);
+}
+`,
+].join("\n");
+
+/** 水底平面:浅蓝(中心)→ 白(边缘)径向渐变,受光照 + 焦散 + 液滴软影 */
+export const LUX_BOTTOM_VERT = /* glsl */ `
+varying vec2 vUv;
+varying vec3 vWorld;
+void main() {
+  vUv = uv;
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vWorld = wp.xyz;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+export const LUX_BOTTOM_FRAG = [
+  COMMON_UNIFORMS,
+  COMMON_HELPERS,
+  /* glsl */ `
+varying vec2 vUv;
+varying vec3 vWorld;
+void main() {
+  // 径向渐变:域中心浅蓝 → 边缘白(uv 0.5 为中心)
+  float dist = distance(vUv, vec2(0.5)) * 1.4142; // 0(中心)→1(角点)
+  vec3 lightBlue = vec3(0.55, 0.78, 0.92); // 浅蓝(sRGB 屏显值)
+  vec3 white = vec3(0.92, 0.95, 0.98);     // 近白
+  vec3 grad = mix(lightBlue, white, smoothstep(0.0, 1.0, dist));
+  // 焦散(∇²h 聚焦)+ 液滴软影(复用 shadeBottom 的光照逻辑)
+  vec2 wxz = vWorld.xz;
+  vec2 uvh = clamp(wxz * uUvK.x + uUvK.y, vec2(0.002), vec2(0.998));
+  vec3 slope;
+  float lap;
+  heightDerivs(uvh, slope, lap);
+  float ca = clamp(lap * uCausticScale * CAUSTIC_GAIN, -0.8, 3.0);
+  // 液滴软影:取最近一颗的影响(非累乘,避免落滴越多水底越暗)
+  float shadow = 1.0;
+  float maxInfluence = 0.0;
+  for (int i = 0; i < MAXD; i++) {
+    float on = step(float(i) + 0.5, uDropCountF);
+    float dd = distance(wxz, uDropPos[i]);
+    float r = max(uDropRad[i], 1e-4);
+    float infl = uShadow * smoothstep(r * 2.2, r * 0.6, dd) * on;
+    maxInfluence = max(maxInfluence, infl);
+  }
+  shadow = 1.0 - maxInfluence;
+  vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
+  vec3 col = grad * light * shadow * (1.0 + max(ca, 0.0) * 2.0);
+  col *= 1.0 + min(ca, 0.0);
+  // 夜晚金色光点(同 shadeBottom)
+  if (uNightDots > 0.5) {
+    vec2 cellUv = wxz / uDotCell;
+    vec2 id = floor(cellUv);
+    vec2 f = fract(cellUv);
+    vec2 off = vec2(hash12(id + 13.1), hash12(id + 71.7)) * 0.6 + 0.2;
+    float pd = length(f - off);
+    float pt = smoothstep(0.16, 0.03, pd);
+    float rnd = hash12(id + 5.2);
+    float fl = pow(max(sin(uTime * (1.5 + 3.0 * rnd) + rnd * 40.0), 0.0), 8.0);
+    float caust = clamp(0.6 + lap * uCausticScale * 0.05, 0.0, 1.6);
+    col += uNightDotColor * (pt * fl * caust * 1.5);
+  }
+  col = applyGrade(col);
+  col = applyMist(col, vWorld);
+  col *= mix(1.0, 0.42, uDim);
+  gl_FragColor = vec4(col, 1.0);
 }
 `,
 ].join("\n");

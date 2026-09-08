@@ -28,6 +28,8 @@ import {
 } from "../lighting/presets";
 import { computeBridgeEmphasis } from "../lighting/emphasis";
 import {
+  LUX_BOTTOM_FRAG,
+  LUX_BOTTOM_VERT,
   LUX_BRIDGE_FRAG,
   LUX_BRIDGE_VERT,
   LUX_DROPLET_FRAG,
@@ -73,6 +75,7 @@ interface LuxSystem {
   surfaceMat: THREE.ShaderMaterial;
   dropletMat: THREE.ShaderMaterial;
   bridgeMat: THREE.ShaderMaterial;
+  bottomMat: THREE.ShaderMaterial;
   composer: EffectComposer;
   onTimeChange: ((tod: TimeOfDay) => void) | null;
   setTimeOfDay(tod: TimeOfDay): void;
@@ -174,6 +177,8 @@ function createLuxSystem(opts: {
     vertexShader: LUX_SURFACE_VERT,
     fragmentShader: LUX_SURFACE_FRAG,
     side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false, // 透明水面不写深度,让水底 mesh 透过可见
   });
   const dropletMat = new THREE.ShaderMaterial({
     uniforms,
@@ -186,6 +191,12 @@ function createLuxSystem(opts: {
     fragmentShader: LUX_BRIDGE_FRAG,
     transparent: true,
     depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const bottomMat = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: LUX_BOTTOM_VERT,
+    fragmentShader: LUX_BOTTOM_FRAG,
     side: THREE.DoubleSide,
   });
 
@@ -276,6 +287,7 @@ function createLuxSystem(opts: {
     surfaceMat,
     dropletMat,
     bridgeMat,
+    bottomMat,
     composer,
     onTimeChange: null,
     setTimeOfDay(tod: TimeOfDay): void {
@@ -466,6 +478,20 @@ function mountViewer(
   );
   scene.add(surface);
 
+  // ---- 水底平面:浅蓝白渐变,在 y = -poolDepth(任务②) ----
+  // 略大于域(×1.4)使边缘从水面外可见;灰模用灰色,lux 用渐变 shader。
+  const bottomGeo = new THREE.PlaneGeometry(
+    params.domainSize * 1.4,
+    params.domainSize * 1.4,
+  );
+  const bottomMesh = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(
+    bottomGeo,
+    new THREE.MeshBasicMaterial({ color: 0x7a7a7a, side: THREE.DoubleSide }),
+  );
+  bottomMesh.rotation.x = -Math.PI / 2; // 水平铺设
+  bottomMesh.position.y = -RENDER_PARAMS.poolDepth;
+  scene.add(bottomMesh);
+
   // ---- 线框:64×64 降采样 LineSegments(几何显示,非光照) ----
   const wireIdx = (k: number): number =>
     Math.round((k * (N - 1)) / (WIRE_N - 1));
@@ -501,15 +527,85 @@ function mountViewer(
   );
   scene.add(wireMesh);
 
-  // ---- 液滴:灰 #4A4A4A 球,InstancedMesh;y 向缩放 1−ε 的形变在 M3 接入 ----
+  // ---- 液滴:球冠透镜状(参考液滴浮于液面建模文档)----
+  // 球冠参数化:接触半径 r_c、高度 H、曲率半径 R、接触角 θ
+  //   H = R(1−cosθ),r_c = R·sinθ → R = (r_c² + H²)/(2H),θ = arcsin(r_c/R)
+  // 取 r_c = 1(单位),H = LENS_H = 0.3(扁平透镜)→ R ≈ 1.817,θ ≈ 33.4°
+  // 几何 = 上凸球冠(光滑曲面) + 下平圆盘,边缘相接成封闭透镜
+  // 实例缩放 (r, r·LENS_H·(1−ε), r):r 控制水平展幅,y 向 ε 振荡 = 厚度压缩
+  // 物理侧保留水面耦合反馈与凹陷核 → 液面呈内凹外微凸形态
+  const LENS_H = 0.3; // 球冠高度(单位接触半径下)
+  const LENS_R_CAP = (1 + LENS_H * LENS_H) / (2 * LENS_H); // 曲率半径 ≈1.817
+  const LENS_THETA_MAX = Math.asin(1 / LENS_R_CAP); // 接触角 ≈0.583 rad
+  const LENS_SEG_AZ = 32; // 周向分段(光滑圆周)
+  const LENS_SEG_POL = 16; // 极角分段(顶 → 边缘,光滑曲面)
+  // 构建球冠透镜 BufferGeometry(接触半径=1,底面 y=0,顶 y=LENS_H,中心 y=LENS_H/2)
+  const lensGeo = new THREE.BufferGeometry();
+  {
+    const verts: number[] = [];
+    const norms: number[] = [];
+    const idx: number[] = [];
+    // 球心在 y = R − H(冠顶 y = 球心.y + R = R − H + R = 2R − H... 不对)
+    // 正确:球心在 y = −(R − H),冠顶 y = 球心.y + R = H,边缘 y = 球心.y + R·cosθ = 0
+    const sphereCenterY = -(LENS_R_CAP - LENS_H); // 球心 y = H − R ≈ −1.517
+    // 顶部单顶点(北极,theta=0)
+    const topIdx = 0;
+    verts.push(0, LENS_H, 0);
+    norms.push(0, 1, 0);
+    // 环带:theta 从 Δθ 到 θ_max(跳过 theta=0,顶部已建单顶点)
+    const rings: number[][] = []; // rings[p] = 第 p 环的顶点索引数组(p=1..LENS_SEG_POL)
+    for (let p = 1; p <= LENS_SEG_POL; p++) {
+      const theta = (p / LENS_SEG_POL) * LENS_THETA_MAX;
+      const ring: number[] = [];
+      for (let a = 0; a < LENS_SEG_AZ; a++) {
+        const phi = (a / LENS_SEG_AZ) * Math.PI * 2;
+        const sinT = Math.sin(theta);
+        const cosT = Math.cos(theta);
+        const x = LENS_R_CAP * sinT * Math.cos(phi);
+        const z = LENS_R_CAP * sinT * Math.sin(phi);
+        const y = sphereCenterY + LENS_R_CAP * cosT;
+        verts.push(x, y, z);
+        norms.push(sinT * Math.cos(phi), cosT, sinT * Math.sin(phi));
+        ring.push(verts.length / 3 - 1);
+      }
+      rings.push(ring);
+    }
+    // 顶部三角形扇(顶点 → 第一环)
+    // 绕序:从外部(上方)看顺时针 → 面法线朝上(向外,与顶点法线一致)
+    const firstRing = rings[0]!;
+    for (let a = 0; a < LENS_SEG_AZ; a++) {
+      const a2 = (a + 1) % LENS_SEG_AZ;
+      idx.push(topIdx, firstRing[a2]!, firstRing[a]!);
+    }
+    // 环带四边形(两个三角形)
+    // 绕序:面法线朝外(径向外 + 上),与顶点法线一致
+    for (let p = 0; p < LENS_SEG_POL - 1; p++) {
+      const r0 = rings[p]!;
+      const r1 = rings[p + 1]!;
+      for (let a = 0; a < LENS_SEG_AZ; a++) {
+        const a2 = (a + 1) % LENS_SEG_AZ;
+        idx.push(r0[a]!, r0[a2]!, r1[a]!);
+        idx.push(r0[a2]!, r1[a2]!, r1[a]!);
+      }
+    }
+    // 下平圆盘:中心顶点 + 边缘环(复用最后一环 rings[LENS_SEG_POL-1])
+    // 绕序:从外部(下方)看顺时针 → 面法线朝下(向外,与顶点法线一致)
+    const bottomCenter = verts.length / 3;
+    verts.push(0, 0, 0);
+    norms.push(0, -1, 0);
+    const edgeRing = rings[LENS_SEG_POL - 1]!;
+    for (let a = 0; a < LENS_SEG_AZ; a++) {
+      const a2 = (a + 1) % LENS_SEG_AZ;
+      idx.push(bottomCenter, edgeRing[a]!, edgeRing[a2]!);
+    }
+    lensGeo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+    lensGeo.setAttribute("normal", new THREE.Float32BufferAttribute(norms, 3));
+    lensGeo.setIndex(idx);
+  }
   const dropletMesh = new THREE.InstancedMesh<
-    THREE.SphereGeometry,
+    THREE.BufferGeometry,
     THREE.Material
-  >(
-    new THREE.SphereGeometry(1, 24, 16),
-    new THREE.MeshBasicMaterial({ color: 0x4a4a4a }),
-    params.maxDroplets,
-  );
+  >(lensGeo, new THREE.MeshBasicMaterial({ color: 0x4a4a4a }), params.maxDroplets);
   dropletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   dropletMesh.frustumCulled = false;
   dropletMesh.count = 0;
@@ -529,12 +625,18 @@ function mountViewer(
     dropletMesh.count = d.count;
     for (let i = 0; i < d.count; i++) {
       const r = d.r[i]!;
-      // y 向压扁形变(§4.3 Deformation):scale = (r, r·(1−ε), r)
-      dropletMatrix.makeScale(r, r * (1 - d.eps[i]!), r);
-      // 液滴坐标是米(非格索引):世界位 = 米 − 半域
+      // 透镜缩放:xz=r(水平展幅),y=r·LENS_H·(1−ε)(透镜厚度方向,ε 振荡=厚度压缩)
+      // 几何体底面 y=0 → setPosition y = 底面世界 y(贴水面)
+      const lensThick = r * LENS_H * (1 - d.eps[i]!);
+      dropletMatrix.makeScale(r, lensThick, r);
+      // 透镜完全托举在液面:底面贴水面总高度。
+      // 漂浮态用水面总高度(含波纹);空中段(未入水)用物理 z 保持抛物线轨迹。
+      const surfH = d.floating[i] === 1
+        ? engine.field.totalHeight(d.x[i]!, d.y[i]!)
+        : d.z[i]! - r; // 空中:底面 = 物理 z − R(球模型)
       dropletMatrix.setPosition(
         d.x[i]! - half,
-        d.z[i]!, // 引擎维护:总高 + (R − d)(空中段为积分高度)
+        surfH,
         d.y[i]! - half,
       );
       dropletMesh.setMatrixAt(i, dropletMatrix);
@@ -626,14 +728,14 @@ function mountViewer(
       const n2x = uy * n1z - uz * n1y;
       const n2y = uz * n1x - ux * n1z;
       const n2z = ux * n1y - uy * n1x;
-      // 桥管形(第三批②再收窄:委托方反馈「依旧过宽,尤其两端」):
+      // 桥管形(第三批②再收窄 + 本批颈径再收窄):
       // - 跨距表面到表面:两端各内嵌 0.75r(接头藏入液滴内部,同色不可见);
-      // - 端径 0.36·r(两端按各自液滴比例张开,大滴端更粗)、颈径 0.30·min(r),
-      //   颈/端比 ≈0.83——两端略宽、中间收窄的细颈;
+      // - 端径 0.36·r(两端按各自液滴比例张开,大滴端更粗)、颈径 0.18·min(r),
+      //   颈/端比 ≈0.5——两端略宽、中间显著收窄的细颈(委托方「液桥中心宽度再收窄」);
       // - 拉伸变细:半径 ×√(restLen/dist)(体积守恒的观感,拉伸成细丝而不断裂)
       const ra = d.r[ia]!;
       const rb = d.r[ib]!;
-      const rNeck = 0.3 * Math.min(ra, rb);
+      const rNeck = 0.18 * Math.min(ra, rb);
       const rEndA = 0.36 * ra;
       const rEndB = 0.36 * rb;
       const bsState = engine.bridges.state;
@@ -754,6 +856,7 @@ function mountViewer(
     surface.material = luxSys.surfaceMat;
     dropletMesh.material = luxSys.dropletMat;
     bridgeMesh.material = luxSys.bridgeMat;
+    bottomMesh.material = luxSys.bottomMat;
     bridgeMesh.renderOrder = 10; // 透明液桥最后画
     // 实例属性:压扁系数(法线修正)/ 桥逐顶点法线与高亮因子
     epsAttr = new THREE.InstancedBufferAttribute(
@@ -845,10 +948,12 @@ function mountViewer(
   const dimWire = new THREE.Color(0x242424);
   const dimBg = new THREE.Color(0x8f8f8f);
   const dimBridge = new THREE.Color(0x2e2e2e);
+  const dimBottom = new THREE.Color(0x2a2a2a);
   const baseSurface = new THREE.Color(COLOR_SURFACE);
   const baseWire = new THREE.Color(COLOR_WIRE);
   const baseBg = new THREE.Color(COLOR_BG);
   const baseBridge = new THREE.Color(0x4a4a4a);
+  const baseBottom = new THREE.Color(0x7a7a7a);
   const surfaceMat = surface.material as THREE.MeshBasicMaterial;
   const wireMat = wireMesh.material as THREE.LineBasicMaterial;
   const bridgeMat = bridgeMesh.material as THREE.MeshBasicMaterial;
@@ -885,6 +990,7 @@ function mountViewer(
     surfaceMat.color.lerpColors(baseSurface, dimSurface, focusMix);
     wireMat.color.lerpColors(baseWire, dimWire, focusMix);
     bridgeMat.color.lerpColors(baseBridge, dimBridge, focusMix);
+    (bottomMesh.material as THREE.MeshBasicMaterial).color.lerpColors(baseBottom, dimBottom, focusMix);
     (scene.background as THREE.Color).lerpColors(baseBg, dimBg, focusMix);
     // 液滴逐实例明暗:组内提亮,组外压暗(灰度,无彩色)
     const d = engine.droplets.state;
