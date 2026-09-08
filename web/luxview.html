@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>水体物理仿真 · 灰模</title>
+    <title>水滴关系网 · 光影(模块③)</title>
     <style>
       html,
       body {
@@ -21,13 +21,14 @@
         position: fixed;
         top: 12px;
         left: 12px;
-        background: rgba(255, 255, 255, 0.72);
-        border: 1px solid #6e6e6e;
+        background: rgba(20, 24, 32, 0.62);
+        border: 1px solid rgba(200, 210, 230, 0.35);
         padding: 10px 12px;
         font-size: 12px;
         line-height: 1.7;
-        color: #2a2a2a;
+        color: #e8ecf4;
         user-select: none;
+        backdrop-filter: blur(6px);
       }
       .hud b {
         font-weight: 600;
@@ -42,18 +43,34 @@
         display: flex;
         gap: 6px;
         margin-top: 8px;
+        flex-wrap: wrap;
       }
       .hud button {
         font: inherit;
         font-size: 11px;
         padding: 3px 8px;
-        border: 1px solid #6e6e6e;
-        background: #e8e8e8;
-        color: #2a2a2a;
+        border: 1px solid rgba(200, 210, 230, 0.4);
+        background: rgba(60, 68, 84, 0.6);
+        color: #e8ecf4;
         cursor: pointer;
       }
       .hud button:hover {
-        background: #dcdcdc;
+        background: rgba(90, 100, 120, 0.7);
+      }
+      .hud button.lux-active {
+        background: #e8ecf4;
+        color: #1a2030;
+        border-color: #e8ecf4;
+      }
+      .tod-row {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(200, 210, 230, 0.25);
+      }
+      .tod-row .tod-label {
+        font-size: 11px;
+        opacity: 0.75;
+        margin-bottom: 4px;
       }
       #gray-error {
         display: none;
@@ -74,9 +91,10 @@
         right: 12px;
         bottom: 12px;
         font-size: 11px;
-        color: #4a4a4a;
+        color: rgba(232, 236, 244, 0.8);
         text-align: right;
         line-height: 1.6;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
       }
     </style>
   </head>
@@ -84,7 +102,7 @@
     <div id="app"></div>
 
     <div class="hud">
-      <b>水体灰模 · 物理验收</b>
+      <b>水滴关系网 · 光影渲染</b>
       <div class="row"><span>fps</span><span id="gray-fps">—</span></div>
       <div class="row"><span>simTime (s)</span><span id="gray-time">0.00</span></div>
       <div class="row"><span>固定步数</span><span id="gray-steps">0</span></div>
@@ -95,21 +113,31 @@
         <button id="gray-btn-pause">暂停</button>
         <button id="gray-btn-step">单步</button>
         <button id="gray-btn-reset">重置</button>
-        <button id="gray-btn-wire">线框:开</button>
+        <button id="gray-btn-wire">线框:关</button>
         <button id="gray-btn-drop">落滴</button>
         <button id="gray-btn-pair">落桥对</button>
         <button id="gray-btn-net">网络</button>
+      </div>
+      <div class="tod-row">
+        <div class="tod-label">时段光系(版本一 · 四种光影)</div>
+        <div class="btns">
+          <button id="lux-btn-dawn" class="lux-active">清晨</button>
+          <button id="lux-btn-noon">正午</button>
+          <button id="lux-btn-dusk">傍晚</button>
+          <button id="lux-btn-night">深夜</button>
+        </div>
       </div>
     </div>
 
     <div id="gray-error"></div>
 
     <div class="legend">
-      灰模:零灯光零颜色,仅几何<br />
-      面 #9A9A9A · 线框 #6E6E6E · 底 #C8C8C8<br />
-      鼠标拖拽旋转 / 滚轮缩放(观察用)
+      水的光学材质:Fresnel 反射 · 折射看水底 · 焦散 · 镜面高光<br />
+      清晨薄雾 / 正午强光 / 傍晚金橙辉光 / 深夜月光与金色光点<br />
+      悬停或点击液滴:仅该滴的液桥变亮加粗 · 双击液滴:聚焦<br />
+      鼠标拖拽旋转 / 滚轮缩放(观察用) · Esc 退出聚焦
     </div>
 
-    <script type="module" src="/src/grayview/main.ts"></script>
+    <script type="module" src="/src/luxview/main.ts"></script>
   </body>
 </html>
