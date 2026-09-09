@@ -131,7 +131,7 @@ const NOON: LightingPreset = {
   bottomAlbedo: [0.1, 0.22, 0.42],
   background: [0.45, 0.63, 0.9],
   surfaceTint: [0.58, 0.79, 0.94], // 淡蓝(原 shader 写死值时段化,观感不变)
-  surfaceTintAmt: 0.55,
+  surfaceTintAmt: 0.68, // 第十一批 0.55→0.68:水面更蓝一档,珍珠液滴对比更强(委托方「可视程度低」整改,允许改水面色)
   mistLayer: 0,
   bottomEdgeLift: 0.16,
 };
@@ -161,7 +161,10 @@ const DUSK: LightingPreset = {
   nightDots: 0,
   nightDotColor: [0, 0, 0],
   waterBody: [0.12, 0.17, 0.3],
-  bottomAlbedo: [0.34, 0.4, 0.52],
+  /** 米白偏米水底(委托方 2026-09-10 第十一批任务⑤)。傍晚弱低角暖光+暗环境,
+   *  按 ACES 标定:albedo×光照×2.15 经色调映射后屏显 ≈ sRGB(0.91,0.86,0.82);
+   *  r>g>b 的米色倾向,焦散细丝在其上呈琥珀金色 */
+  bottomAlbedo: [0.9, 0.85, 0.72],
   background: [0.38, 0.24, 0.21],
   surfaceTint: [0.58, 0.79, 0.94], // 淡蓝(原 shader 写死值时段化,观感不变)
   surfaceTintAmt: 0.55,

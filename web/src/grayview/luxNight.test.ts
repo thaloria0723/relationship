@@ -86,8 +86,9 @@ describe("水面/液滴色调时段化(uTint,清晨部分为第八批成果,保�
     expect(LUX_SURFACE_FRAG).not.toContain("0.58, 0.79, 0.94");
   });
 
-  it("液滴使用 uTint(uTintAmt 缩放保持旧观感),写死淡蓝已移除", () => {
-    expect(LUX_DROPLET_FRAG).toContain("uTintAmt * 0.64");
+  it("液滴使用 uTint(第十一批珍珠奶白体时段化;写死淡蓝已移除)", () => {
+    expect(LUX_DROPLET_FRAG).toContain("uTint * 1.25");
+    expect(LUX_DROPLET_FRAG).toContain("uTintAmt * 0.45");
     expect(LUX_DROPLET_FRAG).not.toContain("0.58, 0.79, 0.94");
   });
 });

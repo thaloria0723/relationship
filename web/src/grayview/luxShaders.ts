@@ -487,13 +487,31 @@ vec3 applyCausticWeb(vec3 col, vec2 wxz, float shadow) {
   col += uSunColor * ca;
   return col;
 }
-// 池底着色:反照率 × 光照 × 焦散网 × 液滴软影(+ 深夜生物荧光海岸)
+// 接触环带光晕(2026-09-10 第十一批,实例.png 要素⑤:液滴贴水缘一圈亮环、
+// 略外溢到水面;夜间液滴为自发光体 → 环带换暖黄,是「光晕落地」的一部分)。
+// 与 dropShadowField 同源遍历 uDropPos/uDropRad,三消费面(水底直视/水面折射/
+// 液滴透镜)经 shadeBottom 共享。
+vec3 dropRingGlow(vec2 wxz) {
+  if (uDropCountF < 0.5) return vec3(0.0);
+  float g = 0.0;
+  for (int i = 0; i < MAXD; i++) {
+    float on = step(float(i) + 0.5, uDropCountF);
+    vec2 rel = wxz - uDropPos[i];
+    float r = max(uDropRad[i], 1e-4);
+    float x = (length(rel) - r * 1.22) / (r * 0.6);
+    g = max(g, exp(-x * x * 3.0) * on);
+  }
+  vec3 dayC = uSunColor * 0.16 + vec3(0.05, 0.06, 0.07);
+  return mix(dayC, vec3(1.0, 0.70, 0.32) * 0.5, uNightDots) * g;
+}
+// 池底着色:反照率 × 光照 × 焦散网 × 液滴软影(+ 接触环带 + 深夜生物荧光海岸)
 // 水面折射与"透过水看到的水底"共用同一函数(折射点 = 折射线与池底平面解析求交)
 vec3 shadeBottom(vec2 wxz) {
   float shadow = 1.0 - dropShadowField(wxz);
   vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
   vec3 col = uBottomAlbedo * light * shadow;
   col = applyCausticWeb(col, wxz, shadow);
+  col += dropRingGlow(wxz);
   col = nightCoast(wxz, col);
   return col;
 }
@@ -575,18 +593,26 @@ void main() {
 ].join("\n");
 
 /** 液滴:半球水滴(委托方 2026-09-09「z 轴拉长至 1.0」:高/半径比 0.3→1.0,
- *  接触角 33°→90° 正半球);实例 y 向缩放 r·(1−ε),法线按 y/x 缩放比修正 */
+ *  接触角 33°→90° 正半球);实例 y 向缩放 r·(1−ε),法线按 y/x 缩放比修正。
+ *  第十一批(2026-09-10)新增 varying:vCenter/vR(透镜采样基准与等效光程缩放,
+ *  任务④放大扭曲水底光纹)、vLocalY(单位几何高度,接触亮环用)。 */
 export const LUX_DROPLET_VERT = /* glsl */ `
 #define LENS_H 1.0
 attribute float aEps;
 varying vec3 vN;
 varying vec3 vW;
 varying vec3 vTint;
+varying vec2 vCenter;  // 滴心世界 xz(instance 平移分量;透镜以滴心为采样基准)
+varying float vR;      // 实例半径(instance 基向量长;等效透镜光程 = vR×MAG)
+varying float vLocalY; // 单位几何高度 y∈[0,1](0=底缘,1=顶)
 void main() {
   vTint = vec3(1.0);
   #ifdef USE_INSTANCING_COLOR
     vTint = instanceColor;
   #endif
+  vCenter = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xz;
+  vR = length(instanceMatrix[0].xyz);
+  vLocalY = position.y;
   // 实例变换 = 平移 · 缩放(r, r·LENS_H·(1−ε), r),无旋转 →
   // 法线修正 = y 除以 LENS_H·(1−ε)(透镜厚度方向非均匀缩放)
   vN = normalize(vec3(normal.x, normal.y / max(LENS_H * (1.0 - aEps), 0.075), normal.z));
@@ -603,45 +629,74 @@ export const LUX_DROPLET_FRAG = [
 varying vec3 vN;
 varying vec3 vW;
 varying vec3 vTint;
+varying vec2 vCenter;
+varying float vR;
+varying float vLocalY;
+// 透镜等效光程 / 半径(第十一批任务④):GPU Gems 2 ch.19「折射模拟 = 折射线 ×
+// 等效光程」的光程缩放;原型 index-wave.html LENS_DEPTH(1.9)同一思想。液滴口径
+// ~5cm 对焦散网胞 ~29cm,光程必须数倍于 r 才能在滴内铺开可读的网纹窗口(放大)。
+#define CAUSTIC_LENS_MAG 3.2
 void main() {
   vec3 n = normalize(vN);
   vec3 v = normalize(cameraPosition - vW);
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
-  // 水材质(委托方 2026-09-09:不再是玻璃球——与液面同族:Snell 折射看水底
-  // (半球透镜的放大扭曲)+ Fresnel 天空反射 + 淡蓝染色,透明度与液面一致)
-  vec3 lit = uSunColor * (0.30 * ndl) + (uAmbSky + uAmbGround) * 0.55;
+  // ---- 深夜:发光小球(第十一批任务③)——自成光源,暖黄 HDR(> bloom 阈值
+  // 0.55)经 UnrealBloom 出光晕;边缘 rim + 白热 GGX 核。日间材质整体让位。 ----
+  if (uNightDots > 0.5) {
+    float core = 0.75 + 0.25 * ndl;
+    float rim = pow(1.0 - nov, 2.0);
+    vec3 col = vec3(1.0, 0.70, 0.30) * (1.9 * core)
+             + vec3(1.0, 0.88, 0.62) * (rim * 1.1)
+             + vec3(1.0, 0.85, 0.55) * ggxSpec(n, v, uSunDir, 0.22) * 2.5;
+    col *= vTint;
+    col = applyGrade(col);
+    gl_FragColor = vec4(col, 0.96);
+    return;
+  }
+  // ---- 白天:珍珠乳白小球(2026-09-10 第十一批,实例.png;修复清晨/正午
+  // 可视程度低——旧材质与液面同套透明水公式,alpha 0.15-0.7 + uTint 洗色)----
+  // 奶白体:uTint/uTintAmt 已时段化 → 清晨粉白/正午蓝白/傍晚亮白
+  vec3 milkBase = mix(vec3(0.88, 0.90, 0.93), uTint * 1.25, uTintAmt * 0.45);
+  vec3 milk = milkBase * ((0.55 + 0.45 * ndl) * 1.35);
+  // 透镜折射:以滴心为基准的等效光程(任务④;边缘压缩全场景、中心放大光纹)
   vec3 rd = refract(-v, n, uEta);
   if (dot(rd, rd) < 1e-5) rd = normalize(vec3(n.x, -0.35, n.z)); // 掠射 TIR 兜底
-  float pathLen = uPoolDepth / max(-rd.y, 0.25);
-  vec2 bpos = vW.xz + rd.xz * pathLen;
-  vec3 bottom = shadeBottom(bpos);
-  vec3 transmit = exp(-uAbsorb * pathLen);
-  vec3 body = bottom * transmit + uWaterBody * (1.0 - dot(transmit, vec3(0.3333))) * 3.0
-            + uTint * 0.35;
-  vec3 env = skyColor(reflect(-v, n));
-  // 色调随预设(2026-09-09 第八批时段化;uTintAmt×0.64 ≈ 旧写死 0.35,
-  // 正午/傍晚观感不变,深夜/清晨随预设变色)
-  vec3 col = mix(mix(body, env, F), uTint, uTintAmt * 0.64);
-  col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint * 0.8;
+  float lensPath = max(vR, 1e-4) * CAUSTIC_LENS_MAG;
+  vec2 bpos = vCenter + rd.xz * (lensPath / max(-rd.y, 0.3));
+  vec3 lensCol = shadeBottom(bpos) * 1.35; // ×1.35 透镜聚光(光纹过滴更亮)
+  // 奶白为壳、折射水底为核(实例.png 蓝核):奶白占比 0.45,核心透出时段水色
+  vec3 col = mix(lensCol, milk, 0.45);
+  col = mix(col, skyColor(reflect(-v, n)), F); // Fresnel 边缘环境反射
+  // 高光:锐 GGX(太阳侧亮斑)+ 宽域柔光(实例.png 亮部高光)
+  col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint * 0.9;
+  col += uSunColor * (pow(ndl, 8.0) * 0.10);
+  // 接触亮环(实例.png 底缘一圈亮环;vLocalY 0=底缘)
+  float ringM = smoothstep(0.28, 0.03, vLocalY);
+  col += (milk * 1.4 + uSunColor * 0.15) * (ringM * (0.5 + 0.5 * F));
   col *= vTint;
   col = applyGrade(col);
   col = applyMist(col, vW);
-  float alpha = mix(0.15, 0.7, F); // 与液面同式:垂直俯视最透,掠射角更实
+  float alpha = mix(0.66, 0.94, F); // 珍珠不透明感(垂直俯视也实,不再透成隐形)
   gl_FragColor = vec4(col, alpha);
 }
 `,
 ].join("\n");
 
-/** 液桥:透明 30%(委托方);高亮因子 aEmph → 提亮 + 提升不透明度 */
+/** 液桥:透明 30%(委托方);高亮因子 aEmph → 提亮 + 提升不透明度。
+ *  第十一批(2026-09-10):aFade = 内部段隐藏因子(CPU 逐顶点算:尖端 0 →
+ *  液滴表面交点 1;任务②伸入液滴后隐藏滴内段,无深度写入也无缝)。 */
 export const LUX_BRIDGE_VERT = /* glsl */ `
 attribute float aEmph;
+attribute float aFade;
 varying vec3 vN;
 varying vec3 vW;
 varying float vEmph;
+varying float vFade;
 void main() {
   vEmph = aEmph;
+  vFade = aFade;
   vN = normal; // CPU 顶点即世界系,径向 = 法线
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vW = wp.xyz;
@@ -656,15 +711,26 @@ export const LUX_BRIDGE_FRAG = [
 varying vec3 vN;
 varying vec3 vW;
 varying float vEmph;
+varying float vFade;
 void main() {
   vec3 n = normalize(vN);
   vec3 v = normalize(cameraPosition - vW);
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
+  // ---- 深夜:暖黄边界线(第十一批任务③)——rim = 侧视轮廓亮线(委托方
+  // 「为液桥加上暖黄色边界线」),HDR>阈值经 bloom 出辉光;体色微暖保可见 ----
+  if (uNightDots > 0.5) {
+    float rim = pow(1.0 - nov, 2.2);
+    vec3 col = vec3(1.0, 0.72, 0.32) * (0.42 + 1.75 * rim)
+             + vec3(1.0, 0.88, 0.60) * ggxSpec(n, v, uSunDir, 0.18) * 2.0;
+    col = applyGrade(col);
+    gl_FragColor = vec4(col, mix(0.38, 0.92, rim) * vFade);
+    return;
+  }
   // 液桥:透明淡蓝(委托方 2026-09-09「液桥改为透明淡蓝色」)。细水柱光程短 →
   // 内体按淡蓝水色调制、受光限幅;常态 alpha 0.30(委托方指定值不变)。
-  // 夜晚天空近黑 → 内体随光照自动隐没,只剩月光镜面
+  // 夜晚天空近黑 → 内体随光照自动隐没,只剩月光镜面(深夜分支接管,见上)
   vec3 lit = uSunColor * (0.25 * ndl) + (uAmbSky + uAmbGround) * 0.6;
   vec3 body = vec3(0.55, 0.78, 0.95) * lit * 1.5;
   vec3 col = body + skyColor(reflect(-v, n)) * (F * 1.1 + 0.3);
@@ -672,7 +738,8 @@ void main() {
   col = mix(col, col * 1.3, vEmph); // 高亮:温和变亮(减弱)
   col = applyGrade(col);
   col = applyMist(col, vW);
-  float alpha = mix(uBridgeOpacity, uBridgeHiOpacity, vEmph); // 30% → 高亮
+  // alpha × vFade:液滴内部段透明隐藏(任务②),表面交点外恢复满值
+  float alpha = mix(uBridgeOpacity, uBridgeHiOpacity, vEmph) * vFade;
   gl_FragColor = vec4(col, alpha);
 }
 `,

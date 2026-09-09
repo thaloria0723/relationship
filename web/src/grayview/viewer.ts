@@ -46,6 +46,16 @@ const COLOR_SURFACE = 0x9a9a9a; // 水面实体
 const COLOR_WIRE = 0x6e6e6e; // 线框
 const COLOR_BG = 0xc8c8c8; // 背景
 
+/** 桥形常量(第十一批 2026-09-10 模块级导出供守护测试;语义见 syncBridges 注释)
+ *  - TIP_SURF:液滴表面与桥轴高的解析交点(半球面高 = 中面 0.5r → ρ̂=√3/2≈0.866,
+ *    缩放/ε 无关)
+ *  - TIP_DEEP:尖端伸入液滴内部的比例(委托方任务②「液桥向内伸入液滴且隐藏内部段」;
+ *    滴内段由 aFade 透明隐藏,lux 无深度写入也无缝;灰模有深度写入天然遮挡)
+ *  - FADE_START:aFade 起升点(距表面交点轴向距离的占比,此前全透明) */
+export const BRIDGE_TIP_SURF = 0.866;
+export const BRIDGE_TIP_DEEP = 0.5;
+export const BRIDGE_FADE_START = 0.25;
+
 const WIRE_N = 64; // 线框降采样(§6:防糊)
 
 /** 确定性 PRNG(演示戳点序列;M4 演示脚本归入 demo.ts 后此处移除) */
@@ -661,8 +671,9 @@ function mountViewer(
   dropletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   dropletMesh.frustumCulled = false;
   dropletMesh.count = 0;
-  // lux:水材质为透明(与液面同透明度);深度不写入,液桥/液面按渲染序正常混合。
-  // 桥插入液滴内部的段已按「尖端=半球表面交点」裁除,不依赖深度遮挡(委托方 2026-09-09)
+  // lux:水材质为珍珠乳白(第十一批,实例.png;高不透明度修复清晨/正午隐形);
+  // 深度不写入,液桥伸入液滴的内部段由 aFade 透明隐藏(第十一批任务②),
+  // 不依赖深度遮挡
   dropletMesh.renderOrder = 5;
   scene.add(dropletMesh);
 
@@ -671,6 +682,7 @@ function mountViewer(
   let epsAttr: THREE.InstancedBufferAttribute | null = null;
   let bridgeNrmAttr: THREE.BufferAttribute | null = null;
   let bridgeEmphAttr: THREE.BufferAttribute | null = null;
+  let bridgeFadeAttr: THREE.BufferAttribute | null = null;
   const emphTarget = new Float32Array((params.maxDroplets * (params.maxDroplets - 1)) / 2);
   const emphCur = new Float32Array((params.maxDroplets * (params.maxDroplets - 1)) / 2);
 
@@ -729,17 +741,11 @@ function mountViewer(
     if (epsAttr) epsAttr.needsUpdate = true;
   };
 
-  // ---- 液桥渲染(任务①):颈状管(两端略宽、中间收窄;表面到表面跨距) ----
+  // ---- 液桥渲染(任务①):颈状管(两端略宽、中间收窄;尖端在液滴内部) ----
   const BRIDGE_LEN = 10; // 轴向环数
   const BRIDGE_RAD = 8; // 周向边数
-  // —— 桥形常量(需求③「两端太宽且与液滴有缝隙」整改)——
-  // 尖端距滴心 / r:半球液滴表面与轴高(中面)的解析交点——
-  // 半球:面高 = r·√(1−ρ̂²) = 中面 0.5r → ρ̂ = √3/2 ≈ 0.866(缩放/ε 无关)。
-  // 尖端恰在表面 → 桥无插入液滴内部的段(委托方 2026-09-09),且随起伏永不脱节
-  const BRIDGE_TIP_FRAC = 0.866;
   const BRIDGE_END_FRAC = 0.16; // 端径 / r(轻微放宽:0.12→0.16;仍远窄于半球直径)
   const BRIDGE_NECK_FRAC = 0.05; // 颈径 / min(r)(两端略宽、中间收窄的细颈)
-  const BRIDGE_TIP_RISE = 0.12; // 端部收细段占桥长比例(尖端半径 0 → 平滑升到全径)
   /** clamp 到 [0,1] 后 smoothstep 缓动 */
   const smooth01 = (u: number): number => {
     const v = Math.min(1, Math.max(0, u));
@@ -852,11 +858,12 @@ function mountViewer(
       const n2x = uy * n1z - uz * n1y;
       const n2y = uz * n1x - ux * n1z;
       const n2z = ux * n1y - uy * n1x;
-      // 桥管形(需求③「两端太宽且与液滴有缝隙」整改):
-      // - 尖端落在液滴表面上:沿轴距滴心 TIP_FRAC·r 处(液镜边缘,液面恰与轴高
-      //   相交),半径在此收细到 0 —— 桥从液面「长出来」,无端面圆盘、无缝隙;
-      // - 端径 0.12·r(旧 0.36 过宽)、颈径 0.05·min(r):保持两端略宽中间收窄;
-      // - 端部 TIP_RISE 内 smoothstep 收细(自由端无喇叭口);
+      // 桥管形(第十一批 2026-09-10 任务②「液桥向内伸入液滴,交界面曲面化融合」):
+      // - 尖端伸入液滴内部 TIP_DEEP·r;半径从尖端 0 起以 smoothstep 凹形舒展,
+      //   恰在表面交点(TIP_SURF·r)处升到全径 → 切线连续的融合倒角
+      //   (BlobTree fillet 思想的网格等价),桥「从液滴里长出来」,随起伏永不脱节;
+      // - 滴内段 aFade 透明隐藏(尖端 0 → 表面交点 1),lux 无深度写入也无缝;
+      // - 端径 0.16·r、颈径 0.05·min(r):保持两端略宽中间收窄;
       // - 拉伸变细:半径 ×√(restLen/dist)(体积守恒观感,拉伸成细丝而不断裂)
       const ra = d.r[ia]!;
       const rb = d.r[ib]!;
@@ -865,9 +872,12 @@ function mountViewer(
         1.25,
         Math.max(0.5, Math.sqrt(bs.restLen[k]! / len)),
       );
-      const tipA = BRIDGE_TIP_FRAC * ra;
-      const tipB = BRIDGE_TIP_FRAC * rb;
-      const span = Math.max(len - tipA - tipB, 1e-4); // 可见段长(两尖端之间)
+      const tipA = BRIDGE_TIP_DEEP * ra;
+      const tipB = BRIDGE_TIP_DEEP * rb;
+      const span = Math.max(len - tipA - tipB, 1e-4); // 两尖端之间跨距
+      // 尖端 → 表面交点的轴向距离(融合倒角区长度,舒展恰在液滴表面完成)
+      const surfA = Math.max((BRIDGE_TIP_SURF - BRIDGE_TIP_DEEP) * ra, 1e-4);
+      const surfB = Math.max((BRIDGE_TIP_SURF - BRIDGE_TIP_DEEP) * rb, 1e-4);
       const pax = ax + ux * tipA;
       const pay = ay + uy * tipA;
       const paz = az + uz * tipA;
@@ -881,10 +891,21 @@ function mountViewer(
         // lux:高亮加粗(委托方「变亮加粗」;灰模无此属性,因子=1)
         const emph = bridgeEmphAttr ? emphCur[k]! : 0;
         const thick = 1 + RENDER_PARAMS.bridgeHiThicken * emph;
-        const edge = Math.min(t, 1 - t);
-        const rise = smooth01(edge / BRIDGE_TIP_RISE);
+        // 融合倒角:尖端 0 → 表面交点 1(凹形舒展,露出即全径)
+        const dA = t * span; // 距 A 端尖端的轴向距离
+        const dB = (1 - t) * span;
+        const rise = Math.min(smooth01(dA / surfA), smooth01(dB / surfB));
         const rr =
           Math.max(free * rise * thin * thick * visK, 1e-5);
+        // 滴内段隐藏因子:交点前 FADE_START 段全透明 → 交点处升满(任务②)
+        const fade = Math.min(
+          smooth01(
+            (dA / surfA - BRIDGE_FADE_START) / (1 - BRIDGE_FADE_START),
+          ),
+          smooth01(
+            (dB / surfB - BRIDGE_FADE_START) / (1 - BRIDGE_FADE_START),
+          ),
+        );
         const cx = pax + (pbx - pax) * t;
         const cy = pay + (pby - pay) * t;
         const cz = paz + (pbz - paz) * t;
@@ -904,6 +925,11 @@ function mountViewer(
             nrm[vi + 1] = n1y * c + n2y * s2;
             nrm[vi + 2] = n1z * c + n2z * s2;
           }
+          if (bridgeFadeAttr) {
+            (bridgeFadeAttr.array as Float32Array)[
+              base + s * BRIDGE_RAD + r
+            ] = fade;
+          }
         }
       }
       if (bridgeEmphAttr) {
@@ -914,6 +940,7 @@ function mountViewer(
     bridgePosAttr.needsUpdate = true;
     if (bridgeNrmAttr) bridgeNrmAttr.needsUpdate = true;
     if (bridgeEmphAttr) bridgeEmphAttr.needsUpdate = true;
+    if (bridgeFadeAttr) bridgeFadeAttr.needsUpdate = true;
   };
 
   const syncWireVisibility = (): void => {
@@ -1002,6 +1029,12 @@ function mountViewer(
       1,
     );
     bridgeGeo.setAttribute("aEmph", bridgeEmphAttr);
+    // 滴内段隐藏因子(第十一批任务②;aFade 语义见 BRIDGE_TIP_DEEP 注释)
+    bridgeFadeAttr = new THREE.BufferAttribute(
+      new Float32Array(bridgeMax * vertsPerBridge),
+      1,
+    );
+    bridgeGeo.setAttribute("aFade", bridgeFadeAttr);
     // 预建 instanceColor 缓冲(USE_INSTANCING_COLOR 需在首帧编译前存在)
     const white = new THREE.Color(1, 1, 1);
     for (let i = 0; i < params.maxDroplets; i++) dropletMesh.setColorAt(i, white);
