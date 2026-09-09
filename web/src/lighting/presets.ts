@@ -34,7 +34,8 @@ export interface LightingPreset {
   /** 高度雾:密度(0=无)与雾色 */
   readonly mistDensity: number;
   readonly mistColor: RGB;
-  /** 焦散(∇²h 聚焦)强度:正午垂直入射透水能量最大 → 全表最强 */
+  /** 焦散网强度(第十批 2026-09-09:Hoskins 焦散网,取代旧 ∇²h 光纹;
+   *  正午垂直入射透水能量最大 → 全表最强;深夜被 uNightDots 关断,亮度让位荧光海岸) */
   readonly causticScale: number;
   /** 镜面 glitter 增益:夜晚月光纯镜面亮部 → 全表最强 */
   readonly glintGain: number;
@@ -183,7 +184,7 @@ const NIGHT: LightingPreset = {
   skyZenith: [0.015, 0.02, 0.05],
   mistDensity: 0,
   mistColor: [0.1, 0.12, 0.18],
-  causticScale: 0.1, // 月光焦散极弱,视觉主导让位荧光海岸
+  causticScale: 0.1, // 深夜焦散网被 uNightDots 关断(亮度只允许来自荧光海岸);数值保排序断言
   glintGain: 2.2, // 月光 glitter 全表最强(测试锁定)
   shadowStrength: 0.35,
   exposure: 0.85,

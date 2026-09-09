@@ -3,7 +3,8 @@
 // 纯模板字符串(three-free),由 grayview/viewer.ts(全工程唯一 import three)
 // 装配进 ShaderMaterial。所有光照按水的物理光学实现:
 //   Fresnel(Schlick, F0=0.02)+ Snell 折射(1/1.33,池底解析求交)
-//   + Beer–Lambert 吸收 + GGX 镜面 + 高度场拉普拉斯焦散 + 高度雾(Mie 风格化)。
+//   + Beer–Lambert 吸收 + GGX 镜面 + 动态焦散网(第十批,2026-09-09,见下)
+//   + 高度雾(Mie 风格化)。
 // 风格化项(设计文档 §3 声明):深夜生物荧光海岸(2026-09-09 第九批,严格还原
 // docs/水底夜晚.jpg 海岸形态;取代旧金色光点阵与第八批等值线网方案)。
 // 液桥常态透明度 30% 为委托方指定值(bridgeOpacity uniform)。
@@ -185,7 +186,6 @@ const AMBIENT_WAVE_GLSL = [
 /** 所有 lux 材质共享的 uniform 声明(viewer 提供同源值对象) */
 const COMMON_UNIFORMS = /* glsl */ `
 #define MAXD 64
-#define CAUSTIC_GAIN 0.03
 #define MIST_HEIGHT_K 7.0
 uniform sampler2D uHeightTex;
 uniform vec2 uTexel;        // 1/N
@@ -406,17 +406,94 @@ vec3 nightCoast(vec2 wxz, vec3 col) {
   col += pCol * (pt * life * dens * tw * pBrt * (0.85 + 1.5 * big));
   return col;
 }
-// 池底着色:反照率 × 光照 × 焦散(∇²h)× 液滴软影(+ 深夜生物荧光海岸)
+// 动态焦散网 v4(2026-09-09 第十批,委托方指令:删除清晨/正午/傍晚 ∇²h 光纹,
+// 改为 docs/光纹.jpg 所示动态光纹;方案与引用:docs/水底光纹焦散网设计方案-2026-09-09.md)。
+// **⚠ 现行实现 = 原型 index-wave.html「迭代折射焦散 + 去平铺三件套」原样移植**
+// (委托方 2026-09-09 提供实例.png(即原型已验收观感)并裁决:此前的替代策略——
+// v2 双层异向叠加、v3 哈希格点 Voronoi、v3.1 蜿蜒谱——均无法达成预期,全部废弃;
+// 原型框架与本项目完全一致,按原型移植)。
+// 原理(图形学经典技法,常量与结构为本项目自定):采样点在三角波场中迭代折叠
+// (模拟折射路径),累积"光会聚度"→ 高会聚处即焦散细丝;丝网是折射的物理产物,
+// 无胞/无多边形。mod+(-250) 大偏移是本技法数值区间的必要部分,不可省。
+// **去平铺三件套**(消除重复单元的正解,原型已验收):
+// ①域扭曲 warpP:慢变大尺度摆动,把瓷砖直边揉成水波曲线;
+// ②双采样融合:同层两个大偏移副本(一旋转 30°)用慢变遮罩 mix 融合,接缝互相遮盖
+//   → 周期性不可见;
+// ③主/次层 seed 独立(相位/偏移/遮罩各自独立),两层反向慢漂 + 斑驳 patch 让局部
+//   涟漪隐没。
+// 本地化差异(仅两处):①采样域 = 世界坐标 wxz(原型为屏幕归一坐标,网纹钉在水底);
+// ②加光走 uSunColor 时段色(原型为纯白),深夜 uNightDots 关断 + 液滴影吃光沿用。
+// 纯 GPU 层(与 nightCoast 同纪律,无 TS 镜像),纯 ALU 零纹理。
+#define CAUSTIC_SCALE 3.4   // 主网密度(世界米 → 模式空间;原型 webScale,胞径≈1/3.4 米)
+#define CAUSTIC_SCALE2 1.9  // 次层密度(更疏、更淡,加深度;原型 webScale2)
+#define CAUSTIC_SPEED 0.5   // 涟漪演化速度(原型 webSpeed;静水池=慢)
+#define CAUSTIC_AMP 0.1     // 主网强度(原型 webAmp)
+#define CAUSTIC_AMP2 0.08   // 次层强度(原型 webAmp2)
+#define CAUSTIC_CLAMP 0.14  // 单层加光上限(原型 webClamp,防过曝死白)
+#define CAUSTIC_WARP 0.3    // 域扭曲幅度(原型 warpAmp,打破平铺直边)
+#define CAUSTIC_PATCH 0.34  // 斑驳(原型 patchAmp;部分水面安静无线,更疏更自然)
+#define CAUSTIC_DRIFT vec2(0.006, -0.004) // 光网整体漂移(m/s;原型 drift)
+// 迭代折射焦散核(Hoskins《Tileable Water Caustic》MdlXz8 量纲修正版,原型同名函数):
+// 返回 0..1(1=焦散亮线);pow 11 = 细丝锐化(折射需要细节可折;底数经 abs 恒正)
+float causticWeb(vec2 uv, float t) {
+  vec2 p = mod(uv * 6.28318530718, 6.28318530718) - 250.0;
+  vec2 i = p;
+  float c = 1.0;
+  float inten = 0.005;
+  for (int n = 0; n < 5; n++) {
+    float tt = t * (1.0 - (3.5 / (float(n) + 1.0)));
+    i = p + vec2(cos(tt - i.x) + sin(tt + i.y),
+                 sin(tt - i.y) + cos(tt + i.x));
+    c += 1.0 / length(vec2(p.x / (sin(i.x + tt) / inten),
+                           p.y / (cos(i.y + tt) / inten)));
+  }
+  c /= 5.0;
+  float shaped = 1.17 - pow(c, 1.4);
+  return clamp(pow(abs(shaped), 11.0), 0.0, 1.0);
+}
+// 去平铺三件套(原型同名函数原样移植)
+// 1) 域扭曲:慢变大尺度摆动,把瓷砖直边揉成水波曲线
+vec2 warpP(vec2 p, float t) {
+  return p + CAUSTIC_WARP * vec2(
+    sin(p.y * 1.7 + t * 0.40 + 2.0) + 0.60 * sin(p.y * 3.9 - t * 0.23),
+    cos(p.x * 1.5 - t * 0.35 + 4.0) + 0.60 * cos(p.x * 3.3 + t * 0.19));
+}
+const mat2 CAUSTIC_ROT = mat2(0.866, 0.5, -0.5, 0.866); // 30°:次副本换个方向
+// 2) 双采样融合:同层两个大偏移副本用慢变遮罩融合,接缝互相遮盖 → 周期性不可见
+// 3) seed 让主/次层相位、偏移、遮罩各自独立
+float aperiodicWeb(vec2 p, float t, float seed) {
+  vec2 q = warpP(p, t);
+  float w1 = causticWeb(q, t + seed);
+  float w2 = causticWeb(CAUSTIC_ROT * (q + vec2(37.2, 11.7)), t + seed + 11.3);
+  float m = 0.5 + 0.5 * sin(p.x * 1.1 + p.y * 0.8 + seed)
+                 * sin(p.x * 0.6 - p.y * 0.9 - seed * 1.7);
+  return mix(w1, w2, m);
+}
+// 焦散网上色(原型 sceneColor 焦散段;加光改 uSunColor 时段色:正午白/清晨暖金/
+// 傍晚琥珀;夜间关断(第九批:亮度只允许来自荧光海岸)、液滴影吃光沿用)
+vec3 applyCausticWeb(vec3 col, vec2 wxz, float shadow) {
+  float gate = uCausticScale * (1.0 - uNightDots) * shadow;
+  vec2 wp = wxz + CAUSTIC_DRIFT * uTime; // 光网整体漂移
+  float web  = aperiodicWeb(wp * CAUSTIC_SCALE, uTime * CAUSTIC_SPEED, 0.0);
+  float web2 = aperiodicWeb(wp * CAUSTIC_SCALE2 + 13.0,
+                            -uTime * CAUSTIC_SPEED * 0.7 + 7.0, 5.0);
+  // 斑驳:局部水面安静、涟漪隐没(更疏、更自然)。
+  // ⚠ 变量名不可叫 patch(GLSL ES 保留字,第九批同坑;原型内合法但本项目编译器拒绝)
+  float patchFade = 1.0 - CAUSTIC_PATCH * (0.5 + 0.5
+    * sin(wxz.x * 2.6 + wxz.y * 3.4 + uTime * 0.10)
+    * sin(wxz.x * 1.2 - wxz.y * 2.2 - uTime * 0.07));
+  float ca = (min(web * CAUSTIC_AMP, CAUSTIC_CLAMP)
+            + min(web2 * CAUSTIC_AMP2, CAUSTIC_CLAMP * 0.6)) * patchFade * gate;
+  col += uSunColor * ca;
+  return col;
+}
+// 池底着色:反照率 × 光照 × 焦散网 × 液滴软影(+ 深夜生物荧光海岸)
 // 水面折射与"透过水看到的水底"共用同一函数(折射点 = 折射线与池底平面解析求交)
-vec3 shadeBottom(vec2 uv, vec2 wxz) {
-  vec3 slope;
-  float lap;
-  waterDerivs(uv, wxz, slope, lap);
-  float ca = clamp(lap * uCausticScale * CAUSTIC_GAIN, -0.8, 3.0);
+vec3 shadeBottom(vec2 wxz) {
   float shadow = 1.0 - dropShadowField(wxz);
   vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
-  vec3 col = uBottomAlbedo * light * shadow * (1.0 + max(ca, 0.0) * 2.0);
-  col *= 1.0 + min(ca, 0.0); // 凸脊发散 → 压暗
+  vec3 col = uBottomAlbedo * light * shadow;
+  col = applyCausticWeb(col, wxz, shadow);
   col = nightCoast(wxz, col);
   return col;
 }
@@ -478,8 +555,7 @@ void main() {
   vec3 rd = refract(-v, n, uEta);
   float pathLen = uPoolDepth / max(-rd.y, 0.2);
   vec2 bpos = vWorld.xz + rd.xz * pathLen;
-  vec2 buv = clamp(bpos * uUvK.x + uUvK.y, vec2(0.002), vec2(0.998));
-  vec3 bottom = shadeBottom(buv, bpos);
+  vec3 bottom = shadeBottom(bpos);
   vec3 transmit = exp(-uAbsorb * pathLen);
   float tAvg = dot(transmit, vec3(0.3333));
   vec3 body = bottom * transmit + uWaterBody * (1.0 - tAvg) * 3.0;
@@ -540,8 +616,7 @@ void main() {
   if (dot(rd, rd) < 1e-5) rd = normalize(vec3(n.x, -0.35, n.z)); // 掠射 TIR 兜底
   float pathLen = uPoolDepth / max(-rd.y, 0.25);
   vec2 bpos = vW.xz + rd.xz * pathLen;
-  vec2 buv = clamp(bpos * uUvK.x + uUvK.y, vec2(0.002), vec2(0.998));
-  vec3 bottom = shadeBottom(buv, bpos);
+  vec3 bottom = shadeBottom(bpos);
   vec3 transmit = exp(-uAbsorb * pathLen);
   vec3 body = bottom * transmit + uWaterBody * (1.0 - dot(transmit, vec3(0.3333))) * 3.0
             + uTint * 0.35;
@@ -630,15 +705,10 @@ void main() {
   vec3 base = uBottomAlbedo * 2.15;
   vec3 grad = mix(base, base * 0.55 + vec3(uEdgeLift), smoothstep(0.0, 1.0, dist));
   vec2 wxz = vWorld.xz;
-  vec2 uvh = clamp(wxz * uUvK.x + uUvK.y, vec2(0.002), vec2(0.998));
-  vec3 slope;
-  float lap;
-  waterDerivs(uvh, wxz, slope, lap);
-  float ca = clamp(lap * uCausticScale * CAUSTIC_GAIN, -0.8, 3.0);
   float shadow = 1.0 - dropShadowField(wxz);
   vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
-  vec3 col = grad * light * shadow * (1.0 + max(ca, 0.0) * 2.0);
-  col *= 1.0 + min(ca, 0.0);
+  vec3 col = grad * light * shadow;
+  col = applyCausticWeb(col, wxz, shadow);
   col = nightCoast(wxz, col);
   col = applyGrade(col);
   col = applyMist(col, vWorld);
@@ -677,14 +747,15 @@ void main() {
   float n = vnoise(p + q * 1.6);
   float wisp = vnoise(vXZ * 8.5 + q * 0.8 + vec2(uTime * 0.09, -uTime * 0.05));
   float billow = n * 0.68 + wisp * 0.32;
-  float patch = smoothstep(0.38, 0.8, billow); // 团与团之间留空隙(非整片蒙板)
+  // ⚠ 变量名不可叫 patch(GLSL ES 保留字;第八批遗留,部分驱动下静默编译失败,已改名)
+  float billowMask = smoothstep(0.38, 0.8, billow); // 团与团之间留空隙(非整片蒙板)
   // 掠射淡出 + 层下不可见:相机在层上方时 dot(+y, 视线) 大 → 最实
   vec3 v = normalize(cameraPosition - vW);
   float facing = clamp(dot(vec3(0.0, 1.0, 0.0), v), 0.0, 1.0);
   facing *= facing;
   // 域边淡出(雾只罩水体及周边;0.34→0.56 ≈ 水底平面半径 0.575)
   float edge = 1.0 - smoothstep(0.34, 0.56, length(vXZ));
-  float alpha = uMistLayer * patch * facing * edge * 0.5;
+  float alpha = uMistLayer * billowMask * facing * edge * 0.5;
   if (alpha < 0.004) discard;
   vec3 col = uMistColor * 1.12; // 与 applyMist 同族(雾在 grade 之后混合,不做 grade)
   col *= mix(1.0, 0.42, uDim);  // 荱焦压暗与其他材质一致
