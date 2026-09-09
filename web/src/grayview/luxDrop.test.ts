@@ -14,6 +14,8 @@
 // ============================================================
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   LUX_BOTTOM_FRAG,
   LUX_BRIDGE_FRAG,
@@ -22,7 +24,14 @@ import {
   LUX_DROPLET_VERT,
 } from "./luxShaders";
 import { LIGHTING_PRESETS } from "../lighting/presets";
-import { BRIDGE_FADE_START, BRIDGE_TIP_DEEP, BRIDGE_TIP_SURF } from "./viewer";
+import {
+  BRIDGE_BLEND_EXTEND,
+  BRIDGE_END_FRAC,
+  BRIDGE_FADE_START,
+  BRIDGE_NECK_FRAC,
+  BRIDGE_TIP_DEEP,
+  BRIDGE_TIP_SURF,
+} from "./viewer";
 
 /** 从着色器字符串截取 main() 函数体(COMMON_HELPERS 注入会使全文含同名定义) */
 const mainBody = (shader: string): string =>
@@ -108,19 +117,35 @@ describe("任务③ 深夜发光小球 + 液桥暖黄边界线", () => {
   });
 });
 
-describe("任务② 液桥伸入液滴 + 曲面化融合", () => {
-  it("桥形常量:尖端伸入(TIP_DEEP=0.5 < 表面交点 TIP_SURF=0.866)+ aFade 起升点", () => {
+describe("任务② 液桥伸入液滴 + 曲面化融合(第十一批整改:两端放大/深入/圆滑过渡)", () => {
+  it("桥形常量:尖端深入(TIP_DEEP)、端径漏斗放大、倒角越过表面完成(圆滑过渡)", () => {
     expect(BRIDGE_TIP_SURF).toBeCloseTo(0.866, 3); // 半球面与轴高解析交点(√3/2)
     expect(BRIDGE_TIP_DEEP).toBeLessThan(BRIDGE_TIP_SURF);
-    expect(BRIDGE_TIP_DEEP).toBeGreaterThan(0);
+    expect(BRIDGE_TIP_DEEP).toBeGreaterThanOrEqual(0.4); // 深入液滴内部
     expect(BRIDGE_FADE_START).toBeGreaterThan(0);
     expect(BRIDGE_FADE_START).toBeLessThan(1);
+    // 两端适当放大(委托方第十一批整改):端径 ≥0.2r(非细杆)、≥3×颈径(漏斗形)
+    expect(BRIDGE_END_FRAC).toBeGreaterThanOrEqual(0.2);
+    expect(BRIDGE_END_FRAC).toBeLessThan(BRIDGE_TIP_SURF); // 仍远窄于半球直径
+    expect(BRIDGE_END_FRAC).toBeGreaterThanOrEqual(3 * BRIDGE_NECK_FRAC);
+    // 接触面圆滑过渡:倒角完成点越过表面交点(>1)但不越过 2 倍
+    expect(BRIDGE_BLEND_EXTEND).toBeGreaterThan(1);
+    expect(BRIDGE_BLEND_EXTEND).toBeLessThanOrEqual(2);
   });
 
   it("桥 shader 接入 aFade(滴内段 alpha×vFade 隐藏),倒角在表面交点完成", () => {
     expect(LUX_BRIDGE_VERT).toContain("attribute float aFade");
     expect(LUX_BRIDGE_VERT).toContain("vFade = aFade");
     expect(mainBody(LUX_BRIDGE_FRAG)).toContain("* vFade");
+  });
+
+  it("悬浮态视觉抖动修复:渲染底面 = 物理平滑 z−r,不再直用原始场高 totalHeight", () => {
+    // 委托方第十一批反馈:鼠标移到液滴上、液滴悬浮时异常抖动。根因 = 悬停涟漪泵
+    // 在滴下激起 ±9mm@~10Hz 纹波,渲染层 lensBottomY 直用原始场高逐帧跟随;
+    // 物理层第四批 zFollow 已平滑 d.z,渲染层必须同源(源码级守护)。
+    const src = readFileSync(fileURLToPath(new URL("./viewer.ts", import.meta.url)), "utf8");
+    expect(src).toContain("return d.z[i]! - d.r[i]! + amb;"); // 平滑水面(浮态分支)
+    expect(src).not.toContain("const h = engine.field.totalHeight(d.x[i]!, d.y[i]!);");
   });
 });
 
