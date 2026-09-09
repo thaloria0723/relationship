@@ -35,6 +35,8 @@ import {
   LUX_BRIDGE_VERT,
   LUX_DROPLET_FRAG,
   LUX_DROPLET_VERT,
+  LUX_MIST_FRAG,
+  LUX_MIST_VERT,
   LUX_SURFACE_FRAG,
   LUX_SURFACE_VERT,
 } from "./luxShaders";
@@ -172,6 +174,10 @@ function createLuxSystem(opts: {
     uDropPos: { value: dropPosArr },
     uDropRad: { value: dropRadArr },
     uDropCountF: { value: 0 },
+    uTint: { value: new THREE.Color() }, // 水面/液滴统一色调(时段化)
+    uTintAmt: { value: 0.55 },
+    uMistLayer: { value: 0 }, // 上方雾气层强度(清晨 1.0)
+    uEdgeLift: { value: 0.16 }, // 水底渐变边缘提亮(深夜≈0)
   };
 
   const surfaceMat = new THREE.ShaderMaterial({
@@ -204,6 +210,27 @@ function createLuxSystem(opts: {
     side: THREE.DoubleSide,
   });
 
+  // ---- 上方雾气层(2026-09-09 第八批,参考图1清晨蒸汽;强度 = 预设 mistLayer) ----
+  // y=0.055:液滴上方(滴顶 = 波高 + rMax ≈ 0.038)、透明队列最后(renderOrder 11:
+  // 相机在层上方时它是最高透明物,最后画即正确 back-to-front;层下观察 facing 项
+  // 淡出兜底,不会露出平板剪影)。共享同一 uniforms 对象 → 随时段自动渐变。
+  const mistMat = new THREE.ShaderMaterial({
+    uniforms,
+    vertexShader: LUX_MIST_VERT,
+    fragmentShader: LUX_MIST_FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const mistMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(domainSize * 2.2, domainSize * 2.2),
+    mistMat,
+  );
+  mistMesh.rotation.x = -Math.PI / 2;
+  mistMesh.position.y = 0.055;
+  mistMesh.renderOrder = 11;
+  scene.add(mistMesh);
+
   // ---- 后期:HDR MSAA 目标 + bloom(傍晚辉光主力)+ OutputPass(色调映射/sRGB) ----
   const size = new THREE.Vector2();
   renderer.getSize(size);
@@ -234,6 +261,7 @@ function createLuxSystem(opts: {
   const cBody = new THREE.Color();
   const cAlbedo = new THREE.Color();
   const cDots = new THREE.Color();
+  const cTint = new THREE.Color();
   const cBg = new THREE.Color();
 
   const setTarget = (p: (typeof LIGHTING_PRESETS)[TimeOfDay]): void => {
@@ -255,6 +283,7 @@ function createLuxSystem(opts: {
     srgb(p.waterBody, cBody);
     srgb(p.bottomAlbedo, cAlbedo);
     srgb(p.nightDotColor, cDots);
+    srgb(p.surfaceTint, cTint);
     srgb(p.background, cBg);
   };
 
@@ -270,6 +299,10 @@ function createLuxSystem(opts: {
     uniforms.uWaterBody.value.copy(cBody);
     uniforms.uBottomAlbedo.value.copy(cAlbedo);
     uniforms.uNightDotColor.value.copy(cDots);
+    uniforms.uTint.value.copy(cTint);
+    uniforms.uTintAmt.value = target.surfaceTintAmt;
+    uniforms.uMistLayer.value = target.mistLayer;
+    uniforms.uEdgeLift.value = target.bottomEdgeLift;
     uniforms.uMistDensity.value = target.mistDensity;
     uniforms.uCausticScale.value = target.causticScale;
     uniforms.uGlint.value = target.glintGain;
@@ -314,9 +347,13 @@ function createLuxSystem(opts: {
       uniforms.uWaterBody.value.lerp(cBody, k);
       uniforms.uBottomAlbedo.value.lerp(cAlbedo, k);
       uniforms.uNightDotColor.value.lerp(cDots, k);
+      uniforms.uTint.value.lerp(cTint, k);
       const lerpTo = (u: { value: number }, v: number): void => {
         u.value += (v - u.value) * k;
       };
+      lerpTo(uniforms.uTintAmt, target.surfaceTintAmt);
+      lerpTo(uniforms.uMistLayer, target.mistLayer);
+      lerpTo(uniforms.uEdgeLift, target.bottomEdgeLift);
       lerpTo(uniforms.uMistDensity, target.mistDensity);
       lerpTo(uniforms.uCausticScale, target.causticScale);
       lerpTo(uniforms.uGlint, target.glintGain);

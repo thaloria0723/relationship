@@ -52,10 +52,10 @@
         webScale: 3.4, // 主网密度（npx → 模式空间；胞径≈1/webScale 短边）
         webScale2: 1.9, // 次层密度（更疏、更淡，加深度）
         webSpeed: 0.5, // 涟漪演化速度（静水池=慢）
-        webAmp: 0.2, // 主网强度（输出已钳 0..1，AMP 直接决定线亮；验收调整：整体光影减弱）
+        webAmp: 0.1, // 主网强度（降低：给液滴内部折射留视觉空间，非压暗水面）
         webAmp2: 0.08, // 次层强度
         warpAmp: 0.3, // 域扭曲幅度（打破平铺直边，让胞壁呈水波曲线）
-        webClamp: 0.22, // 单层加光上限（防过曝死白）
+        webClamp: 0.14, // 单层加光上限（随 webAmp 同降，防过曝死白）
         patchAmp: 0.34, // 涟漪明暗斑驳（0=均匀，部分水面安静无线）
         drift: [0.006, -0.004], // 光网整体漂移（归一坐标/s）
         swellAmp: 0.018, // 大尺度缓涌的亮度呼吸
@@ -72,11 +72,11 @@
         lightY: 0.55,
 
         // —— 统一高度场（液滴=水面形变，光影由形变推导）——
-        domeH: 0.55, // dome 峰高 / 半径（真实坐滴接触角高，透镜要陡才有水感）
+        domeH: 0.46, // dome 峰高 / 半径（降低圆球感；立体感由 Fresnel+接触区补足，非陡透镜）
         meniscusH: 0.035, // 弯月面凹陷深度 / 半径（加深让嵌入感更明显）
         refractStrength: 0.035, // 水底波纹被形变场偏折的强度（短边比例/单位斜率）
         focusGain: 0.75, // 光会聚度增益（散度→明暗；验收调整：液滴周光影减弱）
-        lensDepth: 3.2, // 液滴透镜的等效水深 / 半径（深→内部纹理位移大、有倒立像感）
+        lensDepth: 1.9, // 液滴透镜的等效水深 / 半径（降低：水感由 Fresnel+折射+反射建立，非极大位移）
 
         // —— P1 镶嵌涟漪环（液滴向外的行波环，响应液滴的存在）——
         // 验收修正：太强/太快/起始太靠外/范围太远 → 慢速 + 弱-强-弱包络 + 从滴内发出 + 贴滴覆盖
@@ -423,37 +423,50 @@ void main() {
       // dome 法线：由高度场解析梯度直接给出（斜率与形变场完全一致）
       vec3 N = normalize(vec3(4.0 * DOME_H * (1.0 - d2) * rel, 1.0));
 
-      // Snell 折射：η=1/1.33；边缘偏移急剧增大（压缩），中心近零（微放大）
+      // —— Snell 折射：η=1/1.33；边缘偏移急剧增大（压缩），中心近零（微放大）——
       vec3 R = refract(vec3(0.0, 0.0, -1.0), N, 0.752);
       if (dot(R, R) < 1e-4) R = normalize(vec3(N.xy, 0.4));   // 掠射角 TIR 兜底
       vec2 refr = c + R.xy / abs(R.z) * r * LENS_DEPTH;
 
-      vec3 dcol = sceneColor(refr) * lightField(refr, mn, uTime);
-      // 透镜对比增强：折射进来的纹理要比周围更"扎眼"（真实水滴的内部高对比）
-      dcol = (dcol - 0.5) * 1.28 + 0.42;
-      dcol = mix(dcol, dcol * vec3(0.94, 0.995, 1.05), 0.22); // 水色微调（轻：保持通透）
-      dcol *= 0.94;                                           // 本体比环境暗一档：亮底上的透镜分离度
-      float thick = pow(dr, 2.6);                             // 边缘水层略厚 → 轻微变暗
-      dcol *= mix(1.0, 0.86, thick);
-      dcol *= vec3(0.975, 1.0, 1.03);                         // 极轻水体吸收
+      // —— 折射色：被液滴扭曲的水面纹理（保留可读性，不再整体压暗/对比拉伸）——
+      vec3 refractedColor = sceneColor(refr) * lightField(refr, mn, uTime);
 
-      // 按位置受光：折射采到的亮度调制高光/窗光（落在亮斑上的液滴更闪）
-      float lum = dot(dcol, vec3(0.299, 0.587, 0.114));
+      // —— Fresnel（空气-水界面 Schlick 近似）：中心低→折射为主，边缘高→反射增强 ——
+      vec3 V = vec3(0.0, 0.0, 1.0);
+      float cosTheta = clamp(dot(N, V), 0.0, 1.0);
+      float F0 = 0.0204;
+      float fresnel = F0 + (1.0 - F0) * pow(1.0 - cosTheta, 5.0);
+
+      // —— 环境反射：上方晨光偏亮灰白 / 天边浅蓝 / 朝光源方向更亮（不纯白）——
+      vec3 RR = 2.0 * cosTheta * N - V;                        // 反射方向
+      float skyUp = clamp(RR.z, 0.0, 1.0);
+      vec3 reflectedColor = mix(vec3(0.70, 0.82, 0.92),       // 天边浅蓝
+                                vec3(0.95, 0.97, 1.0),         // 天顶亮灰白
+                                pow(skyUp, 0.6));
+      float sunHit = clamp(dot(RR, LDIR), 0.0, 1.0);
+      reflectedColor += vec3(1.0, 0.98, 0.95) * pow(sunHit, 8.0) * 0.15;
+
+      // —— Fresnel 合成：中心折射为主，边缘反射增强 ——
+      vec3 dcol = mix(refractedColor, reflectedColor, fresnel);
+      dcol *= vec3(0.98, 1.0, 1.02);                           // 极轻水体颜色修正
+
+      // —— 柔和高光（明显降低，不删；随曲率、环境相关，不抢边缘反射）——
+      float lum = dot(refractedColor, vec3(0.299, 0.587, 0.114));
       float env = 0.72 + 0.55 * smoothstep(0.55, 1.0, lum);
       float win = exp(-dot(rel - vec2(-0.40, 0.38), rel - vec2(-0.40, 0.38)) * 7.5);
-      dcol += vec3(1.0) * win * 0.26 * env;                   // 紧凑窗光（贴边小亮块）
-      float sp = pow(max(dot(N, LDIR), 0.0), 120.0);
-      dcol += vec3(1.0) * sp * 0.45 * env;                    // 锐高光
+      dcol += vec3(1.0) * win * 0.08 * env * (1.0 - fresnel);  // 窗光：0.26→0.08，边缘让位反射
+      float sp = pow(max(dot(N, LDIR), 0.0), 48.0);            // 锐高光：0.45→0.12，指数 120→48 更柔
+      dcol += vec3(1.0) * sp * 0.12 * env;
+
+      // —— P3 边缘折射月牙对（保留：透镜搬光——受光侧暗月牙/背光侧亮月牙）——
       vec2 Lxy = normalize(LDIR.xy + vec2(1e-5, 0.0));
-      // P3 边缘折射月牙对：透镜搬光——受光侧底部边缘光线发散缺光（暗月牙），
-      // 会聚光在背光侧底部集中穿出（亮月牙）；贴底弧带×方向权重自然成月牙形
       vec2 Nn = normalize(N.xy + vec2(1e-5, 0.0));
       float face = dot(Nn, Lxy);
       float crescent = smoothstep(0.80, 0.995, dr);  // 贴底边缘弧带（加宽：0.80 起坡，月牙更饱满）
       dcol = mix(dcol, dcol * vec3(0.45, 0.58, 0.70), crescent * clamp(face, 0.0, 1.0) * 0.55); // 受光侧：暗月牙（蓝灰调）
       dcol += vec3(0.93, 0.99, 1.0) * crescent * clamp(-face, 0.0, 1.0) * (0.14 + 0.12 * env);  // 背光侧：亮月牙（×env）
       float cg = exp(-dot(rel - vec2(0.30, -0.34), rel - vec2(0.30, -0.34)) * 7.0);
-      dcol += vec3(0.96, 1.0, 1.0) * cg * 0.18;               // 内部焦散聚光
+      dcol += vec3(0.96, 1.0, 1.0) * cg * 0.10;               // 内部焦散聚光：0.18→0.10 让位折射纹理
 
       float a = smoothstep(1.0, 0.94, dr);
       col = mix(col, dcol, a);

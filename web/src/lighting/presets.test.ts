@@ -47,6 +47,7 @@ describe("四时段光系预设", () => {
         p.waterBody,
         p.bottomAlbedo,
         p.background,
+        p.surfaceTint,
       ]) {
         for (const x of c) {
           expect(x, `${key} 颜色分量越界`).toBeGreaterThanOrEqual(0);
@@ -103,7 +104,50 @@ describe("四时段光系预设", () => {
     expect(noon.saturation).toBeGreaterThan(1.05); // 色彩鲜明
   });
 
-  it("委托方 b:傍晚 bloom 辉光最强且对比加深;夜晚 glitter 最强且唯一开金色光点", () => {
+  it("第八批(2026-09-09)参考图1:清晨水面粉紫色调(r、b 均高于 g)", () => {
+    const [r, g, b] = LIGHTING_PRESETS.dawn.surfaceTint;
+    expect(Math.min(r, b)).toBeGreaterThan(g);
+  });
+
+  it("第八批:上方雾气层唯清晨开启(mistLayer>0),其余时段关闭", () => {
+    const { dawn, noon, dusk, night } = LIGHTING_PRESETS;
+    expect(dawn.mistLayer).toBeGreaterThan(0);
+    expect(dawn.mistLayer).toBeLessThanOrEqual(1);
+    for (const p of [noon, dusk, night]) expect(p.mistLayer).toBe(0);
+  });
+
+  it("第八批:新数值字段范围 surfaceTintAmt∈(0,1] / mistLayer∈[0,1] / bottomEdgeLift≥0", () => {
+    for (const key of TIME_ORDER) {
+      const p = LIGHTING_PRESETS[key];
+      expect(p.surfaceTintAmt).toBeGreaterThan(0);
+      expect(p.surfaceTintAmt).toBeLessThanOrEqual(1);
+      expect(p.mistLayer).toBeGreaterThanOrEqual(0);
+      expect(p.mistLayer).toBeLessThanOrEqual(1);
+      expect(p.bottomEdgeLift).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("第九批参考图(docs/水底夜晚.jpg):夜晚场景黑+深蓝——背景近黑、水底深蓝近黑、环境极低、水面色调深蓝", () => {
+    const night = LIGHTING_PRESETS.night;
+    expect(Math.max(...night.background)).toBeLessThan(0.06);
+    expect(Math.max(...night.bottomAlbedo)).toBeLessThan(0.2);
+    expect(Math.max(...night.ambSky)).toBeLessThan(0.1);
+    const [tr, tg, tb] = night.surfaceTint;
+    expect(tb).toBeGreaterThan(tr);
+    expect(tb).toBeGreaterThan(tg);
+    expect(night.bottomEdgeLift).toBeLessThan(0.05); // 边缘不灰白提亮,水底与场景同色
+  });
+
+  it("第九批参考图:月光冷白(色相近白)+ 夜晚 bloom 加深荧光辉光(dusk 仍全表最强)", () => {
+    const { dusk, night } = LIGHTING_PRESETS;
+    expect(Math.min(...night.sunColor)).toBeGreaterThan(0.7);
+    expect(night.sunColor[2]).toBeGreaterThanOrEqual(night.sunColor[0]);
+    expect(night.bloomStrength).toBeGreaterThan(0.3);
+    expect(night.bloomStrength).toBeLessThan(dusk.bloomStrength);
+    expect(night.bloomThreshold).toBeLessThan(0.7); // 荧光核心/亮颗粒可进 bloom
+  });
+
+  it("委托方 b:傍晚 bloom 辉光最强且对比加深;夜晚 glitter 最强且唯一开荧光层", () => {
     const dusk = LIGHTING_PRESETS.dusk;
     const night = LIGHTING_PRESETS.night;
     for (const key of TIME_ORDER) {
@@ -113,10 +157,10 @@ describe("四时段光系预设", () => {
       expect(p.nightDots).toBe(key === "night" ? 1 : 0);
     }
     expect(dusk.contrast).toBeGreaterThan(1.05); // 电影级强对比
-    // 夜光点为金色:红 > 绿 > 蓝
+    // 夜晚荧光为生物荧光蓝(第九批,参考 docs/水底夜晚.jpg):蓝 > 绿 > 红
     const [r, g, b] = night.nightDotColor;
-    expect(r).toBeGreaterThan(g);
-    expect(g).toBeGreaterThan(b);
+    expect(b).toBeGreaterThan(g);
+    expect(g).toBeGreaterThan(r);
   });
 });
 
