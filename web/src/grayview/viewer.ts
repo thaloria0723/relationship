@@ -28,6 +28,7 @@ import {
 } from "../lighting/presets";
 import { computeBridgeEmphasis } from "../lighting/emphasis";
 import {
+  ambientWaveHeight,
   LUX_BOTTOM_FRAG,
   LUX_BOTTOM_VERT,
   LUX_BRIDGE_FRAG,
@@ -167,6 +168,7 @@ function createLuxSystem(opts: {
     uBridgeOpacity: { value: RENDER_PARAMS.bridgeOpacity },
     uBridgeHiOpacity: { value: RENDER_PARAMS.bridgeHiOpacity },
     uDropDarken: { value: RENDER_PARAMS.dropletDarken },
+    uWaveAmp: { value: RENDER_PARAMS.ambientWaveAmp },
     uDropPos: { value: dropPosArr },
     uDropRad: { value: dropRadArr },
     uDropCountF: { value: 0 },
@@ -184,6 +186,8 @@ function createLuxSystem(opts: {
     uniforms,
     vertexShader: LUX_DROPLET_VERT,
     fragmentShader: LUX_DROPLET_FRAG,
+    transparent: true, // 水材质:与液面同透明度(片元 alpha 生效的前提)
+    depthWrite: false, // 透明不写深度;桥插入段已几何裁除,不依赖深度遮挡
   });
   const bridgeMat = new THREE.ShaderMaterial({
     uniforms,
@@ -464,6 +468,18 @@ function mountViewer(
   }
   const surfacePosAttr = new THREE.BufferAttribute(surfacePos, 3);
   surfaceGeo.setAttribute("position", surfacePosAttr);
+  // uv ↔ 高度纹理格心一一对应(uv=(i+0.5)/N,与 uUvK 世界→uv 约定一致)。
+  // ⚠ 缺 uv 属性时 three 会把 shader 的 uv 绑定到默认值 (0,0) —— 整片水面
+  // 恒采样角点纹素:顶点位移与法线全平,涟漪只在「水底着色」上可见(缺陷根因)
+  const surfaceUv = new Float32Array(N * N * 2);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const k = j * N + i;
+      surfaceUv[k * 2] = (i + 0.5) / N;
+      surfaceUv[k * 2 + 1] = (j + 0.5) / N;
+    }
+  }
+  surfaceGeo.setAttribute("uv", new THREE.BufferAttribute(surfaceUv, 2));
   surfaceGeo.setIndex(index);
   const surface = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(
     surfaceGeo,
@@ -478,11 +494,11 @@ function mountViewer(
   );
   scene.add(surface);
 
-  // ---- 水底平面:浅蓝白渐变,在 y = -poolDepth(任务②) ----
-  // 略大于域(×1.4)使边缘从水面外可见;灰模用灰色,lux 用渐变 shader。
+  // ---- 水底平面:albedo 调制渐变,在 y = -poolDepth(任务②) ----
+  // 略大于域(×1.15)使边缘从水面外可见;过大时裸底外溢扎眼(第七批收敛)
   const bottomGeo = new THREE.PlaneGeometry(
-    params.domainSize * 1.4,
-    params.domainSize * 1.4,
+    params.domainSize * 1.15,
+    params.domainSize * 1.15,
   );
   const bottomMesh = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(
     bottomGeo,
@@ -527,14 +543,13 @@ function mountViewer(
   );
   scene.add(wireMesh);
 
-  // ---- 液滴:球冠透镜状(参考液滴浮于液面建模文档)----
+  // ---- 液滴:半球水滴(委托方 2026-09-09「z 轴拉长至 1.0」:高/半径比 0.3→1.0)----
   // 球冠参数化:接触半径 r_c、高度 H、曲率半径 R、接触角 θ
   //   H = R(1−cosθ),r_c = R·sinθ → R = (r_c² + H²)/(2H),θ = arcsin(r_c/R)
-  // 取 r_c = 1(单位),H = LENS_H = 0.3(扁平透镜)→ R ≈ 1.817,θ ≈ 33.4°
-  // 几何 = 上凸球冠(光滑曲面) + 下平圆盘,边缘相接成封闭透镜
+  // 取 r_c = 1(单位),H = LENS_H = 1.0 → R = 1,θ = 90°(正半球)
+  // 几何 = 上凸半球(光滑曲面) + 下平圆盘,边缘相接成封闭水滴
   // 实例缩放 (r, r·LENS_H·(1−ε), r):r 控制水平展幅,y 向 ε 振荡 = 厚度压缩
-  // 物理侧保留水面耦合反馈与凹陷核 → 液面呈内凹外微凸形态
-  const LENS_H = 0.3; // 球冠高度(单位接触半径下)
+  const LENS_H = 1.0; // 球冠高度(单位接触半径下;1.0 = 半球)
   const LENS_R_CAP = (1 + LENS_H * LENS_H) / (2 * LENS_H); // 曲率半径 ≈1.817
   const LENS_THETA_MAX = Math.asin(1 / LENS_R_CAP); // 接触角 ≈0.583 rad
   const LENS_SEG_AZ = 32; // 周向分段(光滑圆周)
@@ -609,6 +624,9 @@ function mountViewer(
   dropletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   dropletMesh.frustumCulled = false;
   dropletMesh.count = 0;
+  // lux:水材质为透明(与液面同透明度);深度不写入,液桥/液面按渲染序正常混合。
+  // 桥插入液滴内部的段已按「尖端=半球表面交点」裁除,不依赖深度遮挡(委托方 2026-09-09)
+  dropletMesh.renderOrder = 5;
   scene.add(dropletMesh);
 
   // ---- lux 共享状态(luxSys 非空才启用;声明先于同步函数,赋值在光影装配块) ----
@@ -620,25 +638,53 @@ function mountViewer(
   const emphCur = new Float32Array((params.maxDroplets * (params.maxDroplets - 1)) / 2);
 
   const dropletMatrix = new THREE.Matrix4();
+
+  // ---- 聚焦隐藏掩码(需求①:仅中心滴+包围圈滴可见;每帧由 focusGroup 重建) ----
+  const focusMask = new Uint8Array(params.maxDroplets);
+  const syncFocusMask = (): void => {
+    focusMask.fill(0);
+    for (const m of focusGroup) {
+      if (m >= 0 && m < params.maxDroplets) focusMask[m] = 1;
+    }
+  };
+
+  /**
+   * 液滴渲染锚点 = 透镜底面世界 y(液桥端点与本体渲染共用,保证衔接同源):
+   * - 贴水态:水面总高度(lux 叠加环境波涛,液滴随浪起伏);
+   * - 悬浮(聚焦编舞)/退场曲线段:跟随物理 z(底面 = 球心 z − r)——此前悬浮滴
+   *   被钉在水面而液桥按 d.z 升空,是「桥与滴脱节」在聚焦态的根源。
+   */
+  const lensBottomY = (i: number): number => {
+    const d = engine.droplets.state;
+    if (d.floating[i] === 1 && d.lev[i] !== 1 && d.curve[i] !== 1) {
+      const h = engine.field.totalHeight(d.x[i]!, d.y[i]!);
+      const amb = lux
+        ? ambientWaveHeight(d.x[i]! - half, d.y[i]! - half, engine.stats.simTime)
+        : 0;
+      return h + amb;
+    }
+    return d.z[i]! - d.r[i]!;
+  };
+
+  /** 液桥端点锚 = 透镜中面 y(底面 + 半透镜厚;透镜高 = LENS_H·lensThick) */
+  const lensMidY = (i: number): number => {
+    const d = engine.droplets.state;
+    const lensThick = d.r[i]! * LENS_H * (1 - d.eps[i]!);
+    return lensBottomY(i) + 0.5 * LENS_H * lensThick;
+  };
+
   const syncDroplets = (): void => {
     const d = engine.droplets.state;
+    syncFocusMask();
     dropletMesh.count = d.count;
     for (let i = 0; i < d.count; i++) {
       const r = d.r[i]!;
       // 透镜缩放:xz=r(水平展幅),y=r·LENS_H·(1−ε)(透镜厚度方向,ε 振荡=厚度压缩)
-      // 几何体底面 y=0 → setPosition y = 底面世界 y(贴水面)
       const lensThick = r * LENS_H * (1 - d.eps[i]!);
-      dropletMatrix.makeScale(r, lensThick, r);
-      // 透镜完全托举在液面:底面贴水面总高度。
-      // 漂浮态用水面总高度(含波纹);空中段(未入水)用物理 z 保持抛物线轨迹。
-      const surfH = d.floating[i] === 1
-        ? engine.field.totalHeight(d.x[i]!, d.y[i]!)
-        : d.z[i]! - r; // 空中:底面 = 物理 z − R(球模型)
-      dropletMatrix.setPosition(
-        d.x[i]! - half,
-        surfH,
-        d.y[i]! - half,
-      );
+      // 聚焦隐藏:组外滴随 focusMix 平滑收缩到 0(几何消失;物理仍在仿真,退出即恢复)
+      const vis = focusMask[i] === 1 ? 1 : 1 - focusMix;
+      dropletMatrix.makeScale(r * vis, lensThick * vis, r * vis);
+      dropletMatrix.setPosition(d.x[i]! - half, lensBottomY(i), d.y[i]! - half);
       dropletMesh.setMatrixAt(i, dropletMatrix);
       if (epsAttr) epsAttr.setX(i, d.eps[i]!);
     }
@@ -649,6 +695,29 @@ function mountViewer(
   // ---- 液桥渲染(任务①):颈状管(两端略宽、中间收窄;表面到表面跨距) ----
   const BRIDGE_LEN = 10; // 轴向环数
   const BRIDGE_RAD = 8; // 周向边数
+  // —— 桥形常量(需求③「两端太宽且与液滴有缝隙」整改)——
+  // 尖端距滴心 / r:半球液滴表面与轴高(中面)的解析交点——
+  // 半球:面高 = r·√(1−ρ̂²) = 中面 0.5r → ρ̂ = √3/2 ≈ 0.866(缩放/ε 无关)。
+  // 尖端恰在表面 → 桥无插入液滴内部的段(委托方 2026-09-09),且随起伏永不脱节
+  const BRIDGE_TIP_FRAC = 0.866;
+  const BRIDGE_END_FRAC = 0.16; // 端径 / r(轻微放宽:0.12→0.16;仍远窄于半球直径)
+  const BRIDGE_NECK_FRAC = 0.05; // 颈径 / min(r)(两端略宽、中间收窄的细颈)
+  const BRIDGE_TIP_RISE = 0.12; // 端部收细段占桥长比例(尖端半径 0 → 平滑升到全径)
+  /** clamp 到 [0,1] 后 smoothstep 缓动 */
+  const smooth01 = (u: number): number => {
+    const v = Math.min(1, Math.max(0, u));
+    return v * v * (3 - 2 * v);
+  };
+  // 液滴中面锚缓存(syncBridges 每帧开头失效;避免桥对间重复 totalHeight 求值)
+  const midCache = new Float32Array(params.maxDroplets);
+  const midValid = new Uint8Array(params.maxDroplets);
+  const lensMidYCached = (i: number): number => {
+    if (midValid[i] === 0) {
+      midCache[i] = lensMidY(i);
+      midValid[i] = 1;
+    }
+    return midCache[i]!;
+  };
   // 桥池 = 完全图边数(连接语义:任意两漂浮滴都可成桥;须与 BridgeSystem 容量一致)
   const bridgeMax = (params.maxDroplets * (params.maxDroplets - 1)) / 2;
   const vertsPerBridge = (BRIDGE_LEN + 1) * BRIDGE_RAD;
@@ -682,6 +751,9 @@ function mountViewer(
   const syncBridges = (): void => {
     const bs = engine.bridges.state;
     const d = engine.droplets.state;
+    const focusOn = focusGroup.length > 0;
+    // 液滴中面锚缓存(每帧失效;totalHeight 含逐核高斯,避免桥对间重复求值)
+    midValid.fill(0);
     for (let k = 0; k < bridgeMax; k++) {
       const base = k * vertsPerBridge;
       const active = k < bs.count && bs.cut[k] === 0;
@@ -696,12 +768,27 @@ function mountViewer(
       }
       const ia = bs.a[k]!;
       const ib = bs.b[k]!;
+      // 聚焦隐藏(需求①):与包围圈无关的桥随 focusMix 收缩;≥0.98 直接折叠
+      const visK =
+        focusOn && focusMask[ia] !== 1 && focusMask[ib] !== 1
+          ? 1 - focusMix
+          : 1;
+      if (visK <= 0.02) {
+        for (let v = 0; v < vertsPerBridge; v++) {
+          bridgePos[(base + v) * 3] = 0;
+          bridgePos[(base + v) * 3 + 1] = 0;
+          bridgePos[(base + v) * 3 + 2] = 0;
+        }
+        continue;
+      }
+      // 端点 = 液滴渲染锚点(透镜中面,与 syncDroplets 完全同源——液桥始终
+      // 从液滴表面长出来,贴水/悬浮/退场曲线三态都不脱节)
       const ax = d.x[ia]! - half;
       const az = d.y[ia]! - half;
-      const ay = d.z[ia]!;
+      const ay = lensMidYCached(ia);
       const bx = d.x[ib]! - half;
       const bz = d.y[ib]! - half;
-      const by = d.z[ib]!;
+      const by = lensMidYCached(ib);
       // 轴与正交基
       let ux = bx - ax;
       let uy = by - ay;
@@ -728,35 +815,39 @@ function mountViewer(
       const n2x = uy * n1z - uz * n1y;
       const n2y = uz * n1x - ux * n1z;
       const n2z = ux * n1y - uy * n1x;
-      // 桥管形(第三批②再收窄 + 本批颈径再收窄):
-      // - 跨距表面到表面:两端各内嵌 0.75r(接头藏入液滴内部,同色不可见);
-      // - 端径 0.36·r(两端按各自液滴比例张开,大滴端更粗)、颈径 0.18·min(r),
-      //   颈/端比 ≈0.5——两端略宽、中间显著收窄的细颈(委托方「液桥中心宽度再收窄」);
-      // - 拉伸变细:半径 ×√(restLen/dist)(体积守恒的观感,拉伸成细丝而不断裂)
+      // 桥管形(需求③「两端太宽且与液滴有缝隙」整改):
+      // - 尖端落在液滴表面上:沿轴距滴心 TIP_FRAC·r 处(液镜边缘,液面恰与轴高
+      //   相交),半径在此收细到 0 —— 桥从液面「长出来」,无端面圆盘、无缝隙;
+      // - 端径 0.12·r(旧 0.36 过宽)、颈径 0.05·min(r):保持两端略宽中间收窄;
+      // - 端部 TIP_RISE 内 smoothstep 收细(自由端无喇叭口);
+      // - 拉伸变细:半径 ×√(restLen/dist)(体积守恒观感,拉伸成细丝而不断裂)
       const ra = d.r[ia]!;
       const rb = d.r[ib]!;
-      const rNeck = 0.18 * Math.min(ra, rb);
-      const rEndA = 0.36 * ra;
-      const rEndB = 0.36 * rb;
-      const bsState = engine.bridges.state;
+      const rNeck = BRIDGE_NECK_FRAC * Math.min(ra, rb);
       const thin = Math.min(
         1.25,
-        Math.max(0.5, Math.sqrt(bsState.restLen[k]! / len)),
+        Math.max(0.5, Math.sqrt(bs.restLen[k]! / len)),
       );
-      const pax = ax + ux * (0.75 * ra);
-      const pay = ay + uy * (0.75 * ra);
-      const paz = az + uz * (0.75 * ra);
-      const pbx = bx - ux * (0.75 * rb);
-      const pby = by - uy * (0.75 * rb);
-      const pbz = bz - uz * (0.75 * rb);
+      const tipA = BRIDGE_TIP_FRAC * ra;
+      const tipB = BRIDGE_TIP_FRAC * rb;
+      const span = Math.max(len - tipA - tipB, 1e-4); // 可见段长(两尖端之间)
+      const pax = ax + ux * tipA;
+      const pay = ay + uy * tipA;
+      const paz = az + uz * tipA;
+      const pbx = bx - ux * tipB;
+      const pby = by - uy * tipB;
+      const pbz = bz - uz * tipB;
       for (let s = 0; s <= BRIDGE_LEN; s++) {
         const t = s / BRIDGE_LEN;
-        const rEnd = t < 0.5 ? rEndA : rEndB;
+        const rEnd = t < 0.5 ? BRIDGE_END_FRAC * ra : BRIDGE_END_FRAC * rb;
+        const free = rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5;
         // lux:高亮加粗(委托方「变亮加粗」;灰模无此属性,因子=1)
         const emph = bridgeEmphAttr ? emphCur[k]! : 0;
         const thick = 1 + RENDER_PARAMS.bridgeHiThicken * emph;
+        const edge = Math.min(t, 1 - t);
+        const rise = smooth01(edge / BRIDGE_TIP_RISE);
         const rr =
-          (rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5) * thin * thick;
+          Math.max(free * rise * thin * thick * visK, 1e-5);
         const cx = pax + (pbx - pax) * t;
         const cy = pay + (pby - pay) * t;
         const cz = paz + (pbz - paz) * t;

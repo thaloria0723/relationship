@@ -81,7 +81,7 @@ const DAWN: LightingPreset = {
   nightDots: 0,
   nightDotColor: [0, 0, 0],
   waterBody: [0.16, 0.34, 0.37],
-  bottomAlbedo: [0.55, 0.52, 0.46],
+  bottomAlbedo: [0.42, 0.55, 0.64],
   background: [0.6, 0.65, 0.72],
 };
 
@@ -110,7 +110,9 @@ const NOON: LightingPreset = {
   nightDots: 0,
   nightDotColor: [0, 0, 0],
   waterBody: [0.1, 0.36, 0.43],
-  bottomAlbedo: [0.78, 0.75, 0.68],
+  /** 浅蓝水底(委托方 2026-09-09)。正午光照强,albedo×光照在 ACES 前达 2-3
+   *  必然压成惨白;按强光标定取深系数,屏显(色调映射后)才是浅蓝 */
+  bottomAlbedo: [0.1, 0.22, 0.42],
   background: [0.45, 0.63, 0.9],
 };
 
@@ -139,7 +141,7 @@ const DUSK: LightingPreset = {
   nightDots: 0,
   nightDotColor: [0, 0, 0],
   waterBody: [0.12, 0.17, 0.3],
-  bottomAlbedo: [0.42, 0.36, 0.34],
+  bottomAlbedo: [0.34, 0.4, 0.52],
   background: [0.38, 0.24, 0.21],
 };
 
@@ -168,7 +170,9 @@ const NIGHT: LightingPreset = {
   nightDots: 1,
   nightDotColor: [1.0, 0.72, 0.28],
   waterBody: [0.02, 0.045, 0.07],
-  bottomAlbedo: [0.08, 0.09, 0.12],
+  /** 深蓝色水底(委托方 2026-09-09,参考 docs/水底夜晚.jpg)。水底 mesh 自本批起
+   *  以 bottomAlbedo 调制渐变(此前 mesh 写死浅蓝渐变、albedo 只作用于折射视图) */
+  bottomAlbedo: [0.05, 0.1, 0.22],
   background: [0.02, 0.025, 0.05],
 };
 
@@ -196,6 +200,8 @@ export function sunDirection(p: LightingPreset): RGB {
 export const RENDER_PARAMS = {
   /** 视觉池深(米):折射光程/水底平面位置用,风格化(物理流动层 H 是另一回事) */
   poolDepth: 0.14,
+  /** 环境波涛全局幅度倍率(波谱真源在 luxShaders.AMBIENT_WAVES;1=谱默认) */
+  ambientWaveAmp: 1.0,
   /** 水折射率(物理) */
   refractiveIndex: 1.33,
   /** 正入射 Fresnel 反射率 = ((n−1)/(n+1))²(物理,由 1.33 派生 ≈0.0202) */
@@ -216,8 +222,8 @@ export const RENDER_PARAMS = {
   emphLerpTau: 0.12,
   /** 时段切换渐变时间常数(秒):太阳不瞬移 */
   presetLerpTau: 0.45,
-  /** 夜光点阵周期(米)与闪烁速度 */
-  nightDotCell: 0.05,
+  /** 夜光点阵周期(米)与闪烁速度(委托方 2026-09-09:光点过稀 → 点阵加密) */
+  nightDotCell: 0.034,
   /** 雾漂移速度(m/s)与高度衰减(1/m) */
   mistDrift: 0.03,
   mistHeightK: 7.0,

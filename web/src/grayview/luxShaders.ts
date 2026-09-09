@@ -8,6 +8,94 @@
 // 液桥常态透明度 30% 为委托方指定值(bridgeOpacity uniform)。
 // ============================================================
 
+// ============================================================
+// 环境波涛(需求①,参考 docs/波纹2.jpg 的涌动碎波 + 焦散光网):
+// 方向谱叠加(sum of directional waves)+ 深水色散 ω=√(g·k) 整体放慢——
+// three.js 官方 Ocean(Water)与主流 Gerstner 实现同族的谱成分法,本实现
+// 只取垂直位移(域扭曲/折射映射不破格),法线与拉普拉斯全部解析求导。
+// 组件表是唯一真源:GLSL(下方生成)与 TS 侧 ambientWaveHeight 同源,
+// 保证液滴贴浪与水面位移逐点一致。⚠ 两侧都不要手改数值。
+// ============================================================
+
+/** 单个波成分:方向(°)+ 波长(m)+ 振幅(m)+ 相速度缩放(1=深水色散) */
+export interface AmbientWaveComponent {
+  readonly dirDeg: number;
+  readonly lambda: number;
+  readonly amp: number;
+  readonly speed: number;
+}
+
+/** 波谱:长波涌 → 短碎波五成分(域 1m;总幅 ~7mm,总斜率 ~0.24 rad)。
+ *  速度整体减半(委托方 2026-09-09「波浪速度减缓」:0.55-0.75 → 0.28-0.38) */
+export const AMBIENT_WAVES: readonly AmbientWaveComponent[] = [
+  { dirDeg: 20, lambda: 0.36, amp: 0.0032, speed: 0.28 },
+  { dirDeg: 65, lambda: 0.22, amp: 0.002, speed: 0.3 },
+  { dirDeg: -30, lambda: 0.145, amp: 0.00115, speed: 0.33 },
+  { dirDeg: 100, lambda: 0.09, amp: 0.0006, speed: 0.35 },
+  { dirDeg: -70, lambda: 0.058, amp: 0.0003, speed: 0.38 },
+];
+
+const G_GRAVITY = 9.81;
+
+interface AmbientWaveResolved {
+  dx: number;
+  dz: number;
+  k: number;
+  omega: number;
+  amp: number;
+}
+
+const AMBIENT_RESOLVED: AmbientWaveResolved[] = AMBIENT_WAVES.map((w) => {
+  const th = (w.dirDeg * Math.PI) / 180;
+  const k = (2 * Math.PI) / w.lambda;
+  return {
+    dx: Math.cos(th),
+    dz: Math.sin(th),
+    k,
+    omega: Math.sqrt(G_GRAVITY * k) * w.speed,
+    amp: w.amp,
+  };
+});
+
+/**
+ * 环境波涛高度(GLSL ambientWaveField 的逐项同源镜像;viewer 给液滴贴浪用)。
+ * ampScale 用于 λ 缩放实验,默认 1。
+ */
+export function ambientWaveHeight(
+  x: number,
+  z: number,
+  t: number,
+  ampScale = 1,
+): number {
+  let h = 0;
+  for (const w of AMBIENT_RESOLVED) {
+    h += w.amp * Math.sin((w.dx * x + w.dz * z) * w.k - w.omega * t);
+  }
+  return h * ampScale;
+}
+
+/** 由组件表生成 GLSL 逐项展开(ES1.00 无 const 数组,不可下标循环) */
+const AMBIENT_WAVE_GLSL = [
+  "// ---- 环境波涛:五成分方向谱,解析高度/斜率/拉普拉斯(与 TS 同源生成) ----",
+  "float ambientWaveField(vec2 p, float t, out vec2 awSlope, out float awLap) {",
+  "  float h = 0.0;",
+  "  awSlope = vec2(0.0);",
+  "  awLap = 0.0;",
+  ...AMBIENT_RESOLVED.map((w) => {
+    const phase = `dot(p, vec2(${w.dx.toFixed(6)}, ${w.dz.toFixed(6)})) * ${w.k.toFixed(4)} - ${w.omega.toFixed(4)} * t`;
+    return [
+      "  {",
+      `    float ph = ${phase};`,
+      `    h += ${w.amp.toFixed(6)} * sin(ph);`,
+      `    awSlope += vec2(${w.dx.toFixed(6)}, ${w.dz.toFixed(6)}) * ${(w.amp * w.k).toFixed(6)} * cos(ph);`,
+      `    awLap -= ${(w.amp * w.k * w.k).toFixed(6)} * sin(ph);`,
+      "  }",
+    ];
+  }).flat(),
+  "  return h;",
+  "}",
+].join("\n");
+
 /** 所有 lux 材质共享的 uniform 声明(viewer 提供同源值对象) */
 const COMMON_UNIFORMS = /* glsl */ `
 #define MAXD 64
@@ -46,6 +134,7 @@ uniform float uContrast;
 uniform float uBridgeOpacity;
 uniform float uBridgeHiOpacity;
 uniform float uDropDarken;
+uniform float uWaveAmp;       // 环境波涛全局幅度(RENDER_PARAMS.ambientWaveAmp)
 uniform vec2 uDropPos[MAXD];   // 漂浮滴世界 xz(软影用)
 uniform float uDropRad[MAXD];
 uniform float uDropCountF;
@@ -81,6 +170,18 @@ void heightDerivs(vec2 uv, out vec3 slope, out float lap) {
   slope = vec3((hR - hL) / (2.0 * dx), 0.0, (hD - hU) / (2.0 * dx));
   lap = (hL + hR + hD + hU - 4.0 * hC) / (dx * dx);
 }
+${AMBIENT_WAVE_GLSL}
+// 合成水面导数 = 仿真高度纹理 + 环境波涛(解析导数;世界坐标 wxz)
+// 水面法线/水底焦散/折射扭曲统一走这里,保证三层对同一波场一致
+void waterDerivs(vec2 uv, vec2 wxz, out vec3 slope, out float lap) {
+  heightDerivs(uv, slope, lap);
+  vec2 awS;
+  float awL;
+  ambientWaveField(wxz, uTime, awS, awL);
+  slope.x += uWaveAmp * awS.x;
+  slope.z += uWaveAmp * awS.y;
+  lap += uWaveAmp * awL;
+}
 // 程序化天空(反射环境)+ 光源圆盘辉光
 vec3 skyColor(vec3 dir) {
   float t = pow(clamp(dir.y, 0.0, 1.0), 0.5);
@@ -103,39 +204,50 @@ float ggxSpec(vec3 n, vec3 v, vec3 l, float rough) {
   float gl = nl / (nl * (1.0 - k) + k);
   return D * gv * gl / (4.0 * nv);
 }
+// 液滴投影软影(需求②:替代单一径向压暗——太阳方向投影 + 本影/半影两层):
+// 影心沿太阳反方向平移(投高≈池深,风格化),本影紧、半影宽,细腻成锥
+float dropShadowField(vec2 wxz) {
+  float maxInfluence = 0.0;
+  vec2 shift = uSunDir.xz / max(uSunDir.y, 0.4) * (uPoolDepth * 0.85);
+  for (int i = 0; i < MAXD; i++) {
+    float on = step(float(i) + 0.5, uDropCountF);
+    vec2 rel = wxz - (uDropPos[i] - shift);
+    float r = max(uDropRad[i], 1e-4);
+    float dd = length(rel);
+    float umbra = smoothstep(r * 1.05, r * 0.4, dd);
+    float penumbra = smoothstep(r * 2.8, r * 0.85, dd);
+    float infl = uShadow * (umbra * 0.9 + penumbra * 0.42) * on;
+    maxInfluence = max(maxInfluence, infl);
+  }
+  return maxInfluence;
+}
+// 夜晚金色光点(细密化,委托方 2026-09-09:点径收小、点阵加密;
+// 亮度仍受局部焦散调制——光点顺波纹亮带聚簇,参考 docs/水底夜晚.jpg 的点簇观感)
+vec3 nightDotsGlow(vec2 wxz, float lap, vec3 col) {
+  if (uNightDots <= 0.5) return col;
+  vec2 cellUv = wxz / uDotCell;
+  vec2 id = floor(cellUv);
+  vec2 f = fract(cellUv);
+  vec2 off = vec2(hash12(id + 13.1), hash12(id + 71.7)) * 0.6 + 0.2;
+  float pd = length(f - off);
+  float pt = smoothstep(0.105, 0.022, pd);
+  float rnd = hash12(id + 5.2);
+  float fl = pow(max(sin(uTime * (1.5 + 3.0 * rnd) + rnd * 40.0), 0.0), 8.0);
+  float caust = clamp(0.6 + lap * uCausticScale * 0.05, 0.0, 1.6);
+  return col + uNightDotColor * (pt * fl * caust * 1.35);
+}
 // 池底着色:反照率 × 光照 × 焦散(∇²h)× 液滴软影(+ 夜晚金色光点)
 // 水面折射与"透过水看到的水底"共用同一函数(折射点 = 折射线与池底平面解析求交)
 vec3 shadeBottom(vec2 uv, vec2 wxz) {
   vec3 slope;
   float lap;
-  heightDerivs(uv, slope, lap);
+  waterDerivs(uv, wxz, slope, lap);
   float ca = clamp(lap * uCausticScale * CAUSTIC_GAIN, -0.8, 3.0);
-  // 液滴软影:取最近一颗的影响(非累乘,避免落滴越多水底越暗)
-  float shadow = 1.0;
-  float maxInfluence = 0.0;
-  for (int i = 0; i < MAXD; i++) {
-    float on = step(float(i) + 0.5, uDropCountF);
-    float dd = distance(wxz, uDropPos[i]);
-    float r = max(uDropRad[i], 1e-4);
-    float infl = uShadow * smoothstep(r * 2.2, r * 0.6, dd) * on;
-    maxInfluence = max(maxInfluence, infl);
-  }
-  shadow = 1.0 - maxInfluence;
+  float shadow = 1.0 - dropShadowField(wxz);
   vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
   vec3 col = uBottomAlbedo * light * shadow * (1.0 + max(ca, 0.0) * 2.0);
   col *= 1.0 + min(ca, 0.0); // 凸脊发散 → 压暗
-  if (uNightDots > 0.5) {
-    vec2 cellUv = wxz / uDotCell;
-    vec2 id = floor(cellUv);
-    vec2 f = fract(cellUv);
-    vec2 off = vec2(hash12(id + 13.1), hash12(id + 71.7)) * 0.6 + 0.2;
-    float pd = length(f - off);
-    float pt = smoothstep(0.16, 0.03, pd);
-    float rnd = hash12(id + 5.2);
-    float fl = pow(max(sin(uTime * (1.5 + 3.0 * rnd) + rnd * 40.0), 0.0), 8.0);
-    float caust = clamp(0.6 + lap * uCausticScale * 0.05, 0.0, 1.6);
-    col += uNightDotColor * (pt * fl * caust * 1.5);
-  }
+  col = nightDotsGlow(wxz, lap, col);
   return col;
 }
 // 时段 grade(曝光/饱和/对比)+ 高度雾(近水面指数衰减 × 低频漂移噪声)
@@ -156,15 +268,21 @@ vec3 applyMist(vec3 c, vec3 wpos) {
 }
 `;
 
-/** 水面:顶点位移自高度纹理(格心精确采样) */
+/** 水面:顶点位移 = 高度纹理(格心精确采样)+ 环境波涛(与 TS 同源) */
 export const LUX_SURFACE_VERT = /* glsl */ `
 uniform sampler2D uHeightTex;
+uniform float uTime;
+uniform float uWaveAmp;
+${AMBIENT_WAVE_GLSL}
 varying vec2 vUv;
 varying vec3 vWorld;
 void main() {
   vUv = uv;
   vec3 p = position;
-  p.y = texture2D(uHeightTex, vUv).r;
+  vec2 awS;
+  float awL;
+  p.y = texture2D(uHeightTex, vUv).r
+      + uWaveAmp * ambientWaveField(p.xz, uTime, awS, awL);
   vWorld = p;
   gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
 }
@@ -180,7 +298,7 @@ varying vec3 vWorld;
 void main() {
   vec3 slope;
   float lap;
-  heightDerivs(vUv, slope, lap);
+  waterDerivs(vUv, vWorld.xz, slope, lap);
   vec3 n = normalize(vec3(-slope.x, 1.0, -slope.z));
   vec3 v = normalize(cameraPosition - vWorld);
   float nov = max(dot(n, v), 1e-4);
@@ -195,24 +313,25 @@ void main() {
   vec3 transmit = exp(-uAbsorb * pathLen);
   float tAvg = dot(transmit, vec3(0.3333));
   vec3 body = bottom * transmit + uWaterBody * (1.0 - tAvg) * 3.0;
-  // 透明式水面:浅蓝 tint + 折射水底混合,低 alpha 让水底 mesh 透过可见
-  vec3 lightBlueTint = vec3(0.6, 0.8, 0.92);
+  // 透明式水面:淡蓝倾向加强 + 更透(委托方 2026-09-09「液面透明淡蓝」)
+  vec3 lightBlueTint = vec3(0.58, 0.79, 0.94);
   vec3 col = mix(body, env, F);
-  col = mix(col, lightBlueTint, 0.35); // 浅蓝倾向
+  col = mix(col, lightBlueTint, 0.55);
   col += uSunColor * ggxSpec(n, v, uSunDir, uRough) * uGlint;
   col = applyGrade(col);
   col = applyMist(col, vWorld);
   col *= mix(1.0, 0.42, uDim);
   // 透明度:掠射角更不透明(Fresnel),垂直俯视最透明(看水底)
-  float alpha = mix(0.22, 0.85, F);
+  float alpha = mix(0.15, 0.7, F);
   gl_FragColor = vec4(col, alpha);
 }
 `,
 ].join("\n");
 
-/** 液滴:扁平透镜状水滴(上凸下平球冠 + 下平圆面);实例 y 向缩放 LENS_H·(1−ε) */
+/** 液滴:半球水滴(委托方 2026-09-09「z 轴拉长至 1.0」:高/半径比 0.3→1.0,
+ *  接触角 33°→90° 正半球);实例 y 向缩放 r·(1−ε),法线按 y/x 缩放比修正 */
 export const LUX_DROPLET_VERT = /* glsl */ `
-#define LENS_H 0.3
+#define LENS_H 1.0
 attribute float aEps;
 varying vec3 vN;
 varying vec3 vW;
@@ -244,17 +363,26 @@ void main() {
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
-  // 内体受光限幅(直射只按小比例进入内体散射,防高光过曝成白团);
-  // 内体深色 = 吸收腔(委托方「液滴颜色较深」= uDropDarken)
-  vec3 lit = uSunColor * (0.22 * ndl) + (uAmbSky + uAmbGround) * 0.55;
-  vec3 body = (uWaterBody * 1.6 + vec3(0.03, 0.07, 0.09)) * lit * uDropDarken * 2.0;
+  // 水材质(委托方 2026-09-09:不再是玻璃球——与液面同族:Snell 折射看水底
+  // (半球透镜的放大扭曲)+ Fresnel 天空反射 + 淡蓝染色,透明度与液面一致)
+  vec3 lit = uSunColor * (0.30 * ndl) + (uAmbSky + uAmbGround) * 0.55;
+  vec3 rd = refract(-v, n, uEta);
+  if (dot(rd, rd) < 1e-5) rd = normalize(vec3(n.x, -0.35, n.z)); // 掠射 TIR 兜底
+  float pathLen = uPoolDepth / max(-rd.y, 0.25);
+  vec2 bpos = vW.xz + rd.xz * pathLen;
+  vec2 buv = clamp(bpos * uUvK.x + uUvK.y, vec2(0.002), vec2(0.998));
+  vec3 bottom = shadeBottom(buv, bpos);
+  vec3 transmit = exp(-uAbsorb * pathLen);
+  vec3 body = bottom * transmit + uWaterBody * (1.0 - dot(transmit, vec3(0.3333))) * 3.0
+            + vec3(0.58, 0.79, 0.94) * 0.35;
   vec3 env = skyColor(reflect(-v, n));
-  vec3 col = mix(body, env, min(F * 2.2, 1.0));
-  col += uSunColor * ggxSpec(n, v, uSunDir, 0.16) * uGlint * 0.9;
+  vec3 col = mix(mix(body, env, F), vec3(0.58, 0.79, 0.94), 0.35);
+  col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint * 0.8;
   col *= vTint;
   col = applyGrade(col);
   col = applyMist(col, vW);
-  gl_FragColor = vec4(col, 1.0);
+  float alpha = mix(0.15, 0.7, F); // 与液面同式:垂直俯视最透,掠射角更实
+  gl_FragColor = vec4(col, alpha);
 }
 `,
 ].join("\n");
@@ -287,13 +415,12 @@ void main() {
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
-  // 液桥:细水柱光程短 → 内体极淡,受光限幅同液滴;常态 alpha 0.30(委托方)。
-  // 桥与水面同为水材质,镜面项同构会「水隐于水」;细柱曲率小、全方位受天光,
-  // 环境裹挟项 (+0.45·sky) 使其读作一缕微亮水丝(风格化,声明见设计文档 §3);
-  // 夜晚天空近黑 → 自动隐没,只剩月光镜面
+  // 液桥:透明淡蓝(委托方 2026-09-09「液桥改为透明淡蓝色」)。细水柱光程短 →
+  // 内体按淡蓝水色调制、受光限幅;常态 alpha 0.30(委托方指定值不变)。
+  // 夜晚天空近黑 → 内体随光照自动隐没,只剩月光镜面
   vec3 lit = uSunColor * (0.25 * ndl) + (uAmbSky + uAmbGround) * 0.6;
-  vec3 body = (uWaterBody * 1.5 + vec3(0.04, 0.08, 0.1)) * lit * 1.6;
-  vec3 col = body + skyColor(reflect(-v, n)) * (F * 1.2 + 0.45);
+  vec3 body = vec3(0.55, 0.78, 0.95) * lit * 1.5;
+  vec3 col = body + skyColor(reflect(-v, n)) * (F * 1.1 + 0.3);
   col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint;
   col = mix(col, col * 1.3, vEmph); // 高亮:温和变亮(减弱)
   col = applyGrade(col);
@@ -323,45 +450,23 @@ export const LUX_BOTTOM_FRAG = [
 varying vec2 vUv;
 varying vec3 vWorld;
 void main() {
-  // 径向渐变:域中心浅蓝 → 边缘白(uv 0.5 为中心)
+  // 径向渐变:域中心亮 → 边缘暗。以 bottomAlbedo 调制(此前写死浅蓝渐变,
+  // 时段预设的 albedo 只作用于折射视图 → 深夜水底压不暗,缺陷修复);
+  // ×2.15 标定:正午 albedo(≈0.78 灰)时与旧版浅蓝渐变亮度对齐
   float dist = distance(vUv, vec2(0.5)) * 1.4142; // 0(中心)→1(角点)
-  vec3 lightBlue = vec3(0.55, 0.78, 0.92); // 浅蓝(sRGB 屏显值)
-  vec3 white = vec3(0.92, 0.95, 0.98);     // 近白
-  vec3 grad = mix(lightBlue, white, smoothstep(0.0, 1.0, dist));
-  // 焦散(∇²h 聚焦)+ 液滴软影(复用 shadeBottom 的光照逻辑)
+  vec3 base = uBottomAlbedo * 2.15;
+  vec3 grad = mix(base, base * 0.55 + vec3(0.16), smoothstep(0.0, 1.0, dist));
   vec2 wxz = vWorld.xz;
   vec2 uvh = clamp(wxz * uUvK.x + uUvK.y, vec2(0.002), vec2(0.998));
   vec3 slope;
   float lap;
-  heightDerivs(uvh, slope, lap);
+  waterDerivs(uvh, wxz, slope, lap);
   float ca = clamp(lap * uCausticScale * CAUSTIC_GAIN, -0.8, 3.0);
-  // 液滴软影:取最近一颗的影响(非累乘,避免落滴越多水底越暗)
-  float shadow = 1.0;
-  float maxInfluence = 0.0;
-  for (int i = 0; i < MAXD; i++) {
-    float on = step(float(i) + 0.5, uDropCountF);
-    float dd = distance(wxz, uDropPos[i]);
-    float r = max(uDropRad[i], 1e-4);
-    float infl = uShadow * smoothstep(r * 2.2, r * 0.6, dd) * on;
-    maxInfluence = max(maxInfluence, infl);
-  }
-  shadow = 1.0 - maxInfluence;
+  float shadow = 1.0 - dropShadowField(wxz);
   vec3 light = uSunColor * max(uSunDir.y, 0.0) + (uAmbSky + uAmbGround) * 0.5;
   vec3 col = grad * light * shadow * (1.0 + max(ca, 0.0) * 2.0);
   col *= 1.0 + min(ca, 0.0);
-  // 夜晚金色光点(同 shadeBottom)
-  if (uNightDots > 0.5) {
-    vec2 cellUv = wxz / uDotCell;
-    vec2 id = floor(cellUv);
-    vec2 f = fract(cellUv);
-    vec2 off = vec2(hash12(id + 13.1), hash12(id + 71.7)) * 0.6 + 0.2;
-    float pd = length(f - off);
-    float pt = smoothstep(0.16, 0.03, pd);
-    float rnd = hash12(id + 5.2);
-    float fl = pow(max(sin(uTime * (1.5 + 3.0 * rnd) + rnd * 40.0), 0.0), 8.0);
-    float caust = clamp(0.6 + lap * uCausticScale * 0.05, 0.0, 1.6);
-    col += uNightDotColor * (pt * fl * caust * 1.5);
-  }
+  col = nightDotsGlow(wxz, lap, col);
   col = applyGrade(col);
   col = applyMist(col, vWorld);
   col *= mix(1.0, 0.42, uDim);

@@ -258,8 +258,9 @@ export const defaultParams: Readonly<WaterSimParams> = Object.freeze({
   hoverRippleGain: 6,
   levitateHeight: 0.08,
 
-  /** 焦点编舞(第五批):0.4 rad/s ≈ 16s 一圈(缓缓);涟漪峰深 ~2mm 清晰可见 */
-  focusOrbitOmega: 0.4,
+  /** 焦点编舞(第五批):0.4 rad/s ≈ 16s 一圈(缓缓);涟漪峰深 ~2mm 清晰可见。
+   *  需求调整(2026-09-08 委托方):包围圈顺时针旋转再放慢 → 0.15 rad/s ≈ 42s 一圈 */
+  focusOrbitOmega: 0.15,
   focusOrbitRadialK: 3,
   focusRipplePeriod: 0.45,
   focusRippleVolume: 4e-6,
