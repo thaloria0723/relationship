@@ -99,22 +99,23 @@ describe("任务④ 液滴透镜放大扭曲水底光纹", () => {
 });
 
 describe("任务③ 深夜发光小球 + 液桥暖黄边界线", () => {
-  it("液滴:uNightDots 分支 → 暖黄 HDR 自发光(委托方整改:亮度下调 1.15/0.55/1.2,柔和不爆),早退让位日间材质", () => {
+  it("液滴:uNightDots 分支 → 暖黄 HDR 自发光(委托方整改:亮度下调 1.15/0.55/1.2 + GGX 钳制 0.25),早退让位日间材质", () => {
     const drop = mainBody(LUX_DROPLET_FRAG);
     expect(drop).toContain("if (uNightDots > 0.5)");
     expect(drop).toContain("vec3(1.0, 0.70, 0.30) * (1.15 * core)");
     expect(drop).toContain("(rim * 0.55)");
-    expect(drop).toContain("ggxSpec(n, v, uSunDir, 0.22) * 1.2");
+    expect(drop).toContain("min(ggxSpec(n, v, uSunDir, 0.22) * 1.2, 0.25)");
     expect(drop).toContain("pow(1.0 - nov, 2.0)");
     expect(drop.indexOf("if (uNightDots > 0.5)")).toBeLessThan(
       drop.indexOf("milkBase"),
     ); // 夜晚分支先于日间材质
   });
 
-  it("液桥:uNightDots 分支 → 暖黄 rim 边界亮线(委托方整改:亮度下调 0.28/0.85/0.9)", () => {
+  it("液桥:uNightDots 分支 → 暖黄 rim 边界亮线(亮度下调 0.28/0.85 + GGX 钳制 0.2)", () => {
     const bridge = mainBody(LUX_BRIDGE_FRAG);
     expect(bridge).toContain("if (uNightDots > 0.5)");
     expect(bridge).toContain("vec3(1.0, 0.72, 0.32) * (0.28 + 0.85 * rim)");
+    expect(bridge).toContain("min(ggxSpec(n, v, uSunDir, 0.18) * 0.9, 0.2)");
     expect(bridge).toContain("pow(1.0 - nov, 2.2)");
     expect(bridge).toContain("mix(0.38, 0.92, rim) * vFade");
   });

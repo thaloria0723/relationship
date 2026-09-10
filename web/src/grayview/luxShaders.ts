@@ -651,13 +651,14 @@ void main() {
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
   // ---- 深夜:发光小球(第十一批任务③;委托方整改:亮度下调——1.9/1.1/2.5
-  // → 1.15/0.55/1.2,仍高于 bloom 阈值出柔光晕,不再白爆成团) ----
+  // → 1.15/0.55/1.2,仍高于 bloom 阈值出柔光晕,不再白爆成团;GGX 项钳制——
+  // 液滴随波晃动法线扫过月亮方向时 D 峰(数值无界)造成网络级白色闪光) ----
   if (uNightDots > 0.5) {
     float core = 0.75 + 0.25 * ndl;
     float rim = pow(1.0 - nov, 2.0);
     vec3 col = vec3(1.0, 0.70, 0.30) * (1.15 * core)
              + vec3(1.0, 0.88, 0.62) * (rim * 0.55)
-             + vec3(1.0, 0.85, 0.55) * ggxSpec(n, v, uSunDir, 0.22) * 1.2;
+             + vec3(1.0, 0.85, 0.55) * min(ggxSpec(n, v, uSunDir, 0.22) * 1.2, 0.25);
     col *= vTint;
     col = applyGrade(col);
     gl_FragColor = vec4(col, 0.96);
@@ -727,11 +728,13 @@ void main() {
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
   // ---- 深夜:暖黄边界线(第十一批任务③;委托方整改:亮度下调——
-  // 0.42/1.75/2.0 → 0.28/0.85/0.9,体色微暖可见,rim 亮线柔和不爆) ----
+  // 0.42/1.75/2.0 → 0.28/0.85/0.9,体色微暖可见,rim 亮线柔和不爆;
+  // GGX 项钳制——网络内桥姿态相近,晃动时法线同步扫过月亮半向量 →
+  // 全网络同时出高光尖峰 = 整网同步白闪(实测抓帧确认),必须钳制) ----
   if (uNightDots > 0.5) {
     float rim = pow(1.0 - nov, 2.2);
     vec3 col = vec3(1.0, 0.72, 0.32) * (0.28 + 0.85 * rim)
-             + vec3(1.0, 0.88, 0.60) * ggxSpec(n, v, uSunDir, 0.18) * 0.9;
+             + vec3(1.0, 0.88, 0.60) * min(ggxSpec(n, v, uSunDir, 0.18) * 0.9, 0.2);
     col = applyGrade(col);
     gl_FragColor = vec4(col, mix(0.38, 0.92, rim) * vFade);
     return;
