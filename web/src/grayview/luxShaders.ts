@@ -277,10 +277,18 @@ vec3 skyColor(vec3 dir) {
   float t = pow(clamp(dir.y, 0.0, 1.0), 0.5);
   vec3 col = mix(uSkyHorizon, uSkyZenith, t);
   float s = max(dot(dir, uSunDir), 0.0);
-  col += uSunColor * (pow(s, 600.0) * 4.0 + pow(s, 8.0) * 0.08);
+  // 圆盘项钳制(第十一批整改):波面/弹坑边缘法线扫过光源方向时,反射圆盘
+  // HDR 尖峰叠加 GGX 尖峰 = 夜晚不定时白色闪光;钳制后保留光源光路/月辉,
+  // 峰值不再进入 bloom 白爆
+  col += uSunColor * (min(pow(s, 600.0) * 4.0, 1.2) + pow(s, 8.0) * 0.08);
   return col;
 }
-// GGX 镜面高光(Torrance–Sparrow;水面 glitter 的物理来源)
+// GGX 镜面高光(Torrance–Sparrow;水面 glitter 的物理来源)。
+// ⚠ GGX 在低粗糙度下 D 峰值 ∝ 1/α²(数值上无界):波峰/弹坑边缘与光源对齐的
+// 瞬间 HDR 尖峰可达 10+(bloom 白爆)= 夜晚不定时白色闪光(第十一批整改)。
+// GLINT_CLAMP 钳制 glitter 项:夜间尖峰 0.45×月色 < bloom 阈值,闪光消失,
+// 光路/月辉保留;白昼水面本就高亮,观感不变。
+#define GLINT_CLAMP 0.45
 float ggxSpec(vec3 n, vec3 v, vec3 l, float rough) {
   vec3 h = normalize(v + l);
   float a = rough * rough;
@@ -502,7 +510,7 @@ vec3 dropRingGlow(vec2 wxz) {
     g = max(g, exp(-x * x * 3.0) * on);
   }
   vec3 dayC = uSunColor * 0.16 + vec3(0.05, 0.06, 0.07);
-  return mix(dayC, vec3(1.0, 0.70, 0.32) * 0.5, uNightDots) * g;
+  return mix(dayC, vec3(1.0, 0.70, 0.32) * 0.32, uNightDots) * g;
 }
 // 池底着色:反照率 × 光照 × 焦散网 × 液滴软影(+ 接触环带 + 深夜生物荧光海岸)
 // 水面折射与"透过水看到的水底"共用同一函数(折射点 = 折射线与池底平面解析求交)
@@ -581,7 +589,7 @@ void main() {
   // 混合量 = 预设 surfaceTintAmt,正午 0.55 与旧写死淡蓝观感一致)
   vec3 col = mix(body, env, F);
   col = mix(col, uTint, uTintAmt);
-  col += uSunColor * ggxSpec(n, v, uSunDir, uRough) * uGlint;
+  col += uSunColor * min(ggxSpec(n, v, uSunDir, uRough) * uGlint, GLINT_CLAMP);
   col = applyGrade(col);
   col = applyMist(col, vWorld);
   col *= mix(1.0, 0.42, uDim);
@@ -642,14 +650,14 @@ void main() {
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
-  // ---- 深夜:发光小球(第十一批任务③)——自成光源,暖黄 HDR(> bloom 阈值
-  // 0.55)经 UnrealBloom 出光晕;边缘 rim + 白热 GGX 核。日间材质整体让位。 ----
+  // ---- 深夜:发光小球(第十一批任务③;委托方整改:亮度下调——1.9/1.1/2.5
+  // → 1.15/0.55/1.2,仍高于 bloom 阈值出柔光晕,不再白爆成团) ----
   if (uNightDots > 0.5) {
     float core = 0.75 + 0.25 * ndl;
     float rim = pow(1.0 - nov, 2.0);
-    vec3 col = vec3(1.0, 0.70, 0.30) * (1.9 * core)
-             + vec3(1.0, 0.88, 0.62) * (rim * 1.1)
-             + vec3(1.0, 0.85, 0.55) * ggxSpec(n, v, uSunDir, 0.22) * 2.5;
+    vec3 col = vec3(1.0, 0.70, 0.30) * (1.15 * core)
+             + vec3(1.0, 0.88, 0.62) * (rim * 0.55)
+             + vec3(1.0, 0.85, 0.55) * ggxSpec(n, v, uSunDir, 0.22) * 1.2;
     col *= vTint;
     col = applyGrade(col);
     gl_FragColor = vec4(col, 0.96);
@@ -718,12 +726,12 @@ void main() {
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
-  // ---- 深夜:暖黄边界线(第十一批任务③)——rim = 侧视轮廓亮线(委托方
-  // 「为液桥加上暖黄色边界线」),HDR>阈值经 bloom 出辉光;体色微暖保可见 ----
+  // ---- 深夜:暖黄边界线(第十一批任务③;委托方整改:亮度下调——
+  // 0.42/1.75/2.0 → 0.28/0.85/0.9,体色微暖可见,rim 亮线柔和不爆) ----
   if (uNightDots > 0.5) {
     float rim = pow(1.0 - nov, 2.2);
-    vec3 col = vec3(1.0, 0.72, 0.32) * (0.42 + 1.75 * rim)
-             + vec3(1.0, 0.88, 0.60) * ggxSpec(n, v, uSunDir, 0.18) * 2.0;
+    vec3 col = vec3(1.0, 0.72, 0.32) * (0.28 + 0.85 * rim)
+             + vec3(1.0, 0.88, 0.60) * ggxSpec(n, v, uSunDir, 0.18) * 0.9;
     col = applyGrade(col);
     gl_FragColor = vec4(col, mix(0.38, 0.92, rim) * vFade);
     return;

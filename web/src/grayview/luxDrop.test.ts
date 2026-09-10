@@ -22,6 +22,7 @@ import {
   LUX_BRIDGE_VERT,
   LUX_DROPLET_FRAG,
   LUX_DROPLET_VERT,
+  LUX_SURFACE_FRAG,
 } from "./luxShaders";
 import { LIGHTING_PRESETS } from "../lighting/presets";
 import {
@@ -98,22 +99,37 @@ describe("任务④ 液滴透镜放大扭曲水底光纹", () => {
 });
 
 describe("任务③ 深夜发光小球 + 液桥暖黄边界线", () => {
-  it("液滴:uNightDots 分支 → 暖黄 HDR 自发光(> bloom 阈值出光晕),早退让位日间材质", () => {
+  it("液滴:uNightDots 分支 → 暖黄 HDR 自发光(委托方整改:亮度下调 1.15/0.55/1.2,柔和不爆),早退让位日间材质", () => {
     const drop = mainBody(LUX_DROPLET_FRAG);
     expect(drop).toContain("if (uNightDots > 0.5)");
-    expect(drop).toContain("vec3(1.0, 0.70, 0.30) * (1.9 * core)");
+    expect(drop).toContain("vec3(1.0, 0.70, 0.30) * (1.15 * core)");
+    expect(drop).toContain("(rim * 0.55)");
+    expect(drop).toContain("ggxSpec(n, v, uSunDir, 0.22) * 1.2");
     expect(drop).toContain("pow(1.0 - nov, 2.0)");
     expect(drop.indexOf("if (uNightDots > 0.5)")).toBeLessThan(
       drop.indexOf("milkBase"),
     ); // 夜晚分支先于日间材质
   });
 
-  it("液桥:uNightDots 分支 → 暖黄 rim 边界亮线(委托方「暖黄色边界线」)", () => {
+  it("液桥:uNightDots 分支 → 暖黄 rim 边界亮线(委托方整改:亮度下调 0.28/0.85/0.9)", () => {
     const bridge = mainBody(LUX_BRIDGE_FRAG);
     expect(bridge).toContain("if (uNightDots > 0.5)");
-    expect(bridge).toContain("vec3(1.0, 0.72, 0.32) * (0.42 + 1.75 * rim)");
+    expect(bridge).toContain("vec3(1.0, 0.72, 0.32) * (0.28 + 0.85 * rim)");
     expect(bridge).toContain("pow(1.0 - nov, 2.2)");
     expect(bridge).toContain("mix(0.38, 0.92, rim) * vFade");
+  });
+});
+
+describe("夜晚白色闪光修复(第十一批整改:镜面/圆盘尖峰钳制)", () => {
+  it("水面 glitter 项钳制:GGX 低粗糙度 D 峰值数值无界,波峰/弹坑缘对齐月亮时 HDR 10+ 白爆", () => {
+    expect(LUX_SURFACE_FRAG).toContain("#define GLINT_CLAMP 0.45");
+    expect(mainBody(LUX_SURFACE_FRAG)).toContain(
+      "min(ggxSpec(n, v, uSunDir, uRough) * uGlint, GLINT_CLAMP)",
+    );
+  });
+
+  it("反射光源圆盘钳制:波面扫过月亮方向时圆盘项不再叠加出尖峰", () => {
+    expect(LUX_SURFACE_FRAG).toContain("min(pow(s, 600.0) * 4.0, 1.2)");
   });
 });
 
