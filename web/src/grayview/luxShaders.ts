@@ -404,14 +404,17 @@ vec3 nightCoast(vec2 wxz, vec3 col) {
   float pd = length(f - anchor - wander) * uDotCell; // 到颗粒心距离(米)
   float pr = mix(0.0015, 0.0045, big); // 半径绝对值 1.5-4.5mm(格点缩小时仍 ≥1px 恒可见)
   float pt = smoothstep(pr, 0.0, pd);
-  // 热点(成片闪砾,随线同行)+ 近密近亮、向外缓慢稀疏变慢衰减
+  // 热点(成片闪砾,随线同行)+ 近密近亮、向外缓慢稀疏变慢衰减。
+  // ⚠ 第十一批整改:峰值亮度 1.5/1.5 → 1.15/0.9——大颗粒近白色,原峰值 HDR≈6.8
+  // 叠加 bloom 后为「每隔约 6 秒的白色闪光」(tw/life 周期快端 ≈6.3s,颗粒毫米级
+  // → 仅俯视近距可见,委托方实测);压峰后颗粒仍亮、柔和不爆。
   float clump = 0.45 + 0.55 * vnoise(vec2(wxz.x * 2.9 + 7.3, zeta * 2.1)); // patch 为 GLSL 保留字
   float dens = (0.10 + 0.90 * exp(-dn * 0.30)) * clump; // 线处最密,向外缓慢稀疏
-  float pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.5;   // 线处最亮,向外缓慢变暗
+  float pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.15;  // 线处最亮,缓慢变暗
   float whiteMix = clamp(0.3 + 0.6 * exp(-dn * 0.4), 0.0, 0.95); // 线处近白,远处蓝
   float tw = 0.6 + 0.4 * sin(uTime * (0.45 + 0.5 * hb) + ha * 40.0); // 亮度缓变
   vec3 pCol = mix(uNightDotColor, vec3(0.93, 0.97, 1.0), whiteMix);
-  col += pCol * (pt * life * dens * tw * pBrt * (0.85 + 1.5 * big));
+  col += pCol * (pt * life * dens * tw * pBrt * (0.85 + 0.9 * big));
   return col;
 }
 // 动态焦散网 v4(2026-09-09 第十批,委托方指令:删除清晨/正午/傍晚 ∇²h 光纹,

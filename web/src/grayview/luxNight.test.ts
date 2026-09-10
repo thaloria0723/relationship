@@ -64,7 +64,10 @@ describe("深夜生物荧光海岸 · 海岸形态(2026-09-09 第九批重做)",
     expect(LUX_BOTTOM_FRAG).toContain("out float kb, out float zeta"); // 输出随动坐标
     expect(LUX_BOTTOM_FRAG).toContain("vec2(wxz.x, zeta) / uDotCell"); // 格点取在随动坐标系 → 光点贴线同行
     expect(LUX_BOTTOM_FRAG).toContain("(0.10 + 0.90 * exp(-dn * 0.30)) * clump"); // 线处最密,向外缓慢稀疏
-    expect(LUX_BOTTOM_FRAG).toContain("pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.5"); // 线处最亮,缓慢变暗
+    // 第十一批整改:颗粒峰值亮度下调(1.15/0.9)——大颗粒近白色,原峰值 HDR≈6.8
+    // 叠 bloom 为「约 6 秒一次的白色闪光」(tw/life 周期快端 ≈6.3s,毫米级颗粒仅近距可见)
+    expect(LUX_BOTTOM_FRAG).toContain("pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.15");
+    expect(LUX_BOTTOM_FRAG).toContain("(0.85 + 0.9 * big)");
     expect(LUX_BOTTOM_FRAG).toContain("whiteMix = clamp(0.3 + 0.6 * exp(-dn * 0.4)"); // 线处近白
     expect(LUX_BOTTOM_FRAG).toContain("mix(0.0015, 0.0045, big)"); // 半径绝对米数(≥1px 恒可见)
     expect(LUX_BOTTOM_FRAG).toContain("0.45 + 0.55 * vnoise"); // 低频热点(成片闪砾,随线同行)
