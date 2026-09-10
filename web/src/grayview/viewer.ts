@@ -57,7 +57,10 @@ const COLOR_BG = 0xc8c8c8; // 背景
  *    接触面圆滑过渡,委托方第十一批整改) */
 export const BRIDGE_TIP_SURF = 0.866;
 export const BRIDGE_TIP_DEEP = 0.45;
-export const BRIDGE_FADE_START = 0.25;
+/** aFade 起升点(距表面交点轴向距离的占比):0.8 = 滴内段前 80% 完全透明
+ *  (委托方「隐藏进入液滴内部分」二次整改——旧 0.25 渐变横跨滴内段,ghost 可见;
+ *  现仅出场边缘 ~20% 软化,主遮挡由液滴 depthWrite 深度剔除承担) */
+export const BRIDGE_FADE_START = 0.8;
 export const BRIDGE_END_FRAC = 0.3;
 export const BRIDGE_NECK_FRAC = 0.05;
 export const BRIDGE_BLEND_EXTEND = 1.35;
@@ -208,8 +211,11 @@ function createLuxSystem(opts: {
     uniforms,
     vertexShader: LUX_DROPLET_VERT,
     fragmentShader: LUX_DROPLET_FRAG,
-    transparent: true, // 水材质:与液面同透明度(片元 alpha 生效的前提)
-    depthWrite: false, // 透明不写深度;桥插入段已几何裁除,不依赖深度遮挡
+    transparent: true, // 珍珠材质仍有少量透.mix(alpha 0.66-0.94)
+    depthWrite: true, // 珍珠近不透明:写深度 → 真实遮挡。滴内桥段/滴后桥段与雾
+    //   全部被深度测试剔除(委托方「隐藏进入液滴内部分」;透明画序无深度时,
+    //   后画的桥叠在球面上 = 滴内可见液桥穿帮,2026-09-10 二次整改)。
+    //   水面/水底在液滴之前渲染,不受影响;液滴间由 back-to-front 排序兜底。
   });
   const bridgeMat = new THREE.ShaderMaterial({
     uniforms,
@@ -678,8 +684,8 @@ function mountViewer(
   dropletMesh.frustumCulled = false;
   dropletMesh.count = 0;
   // lux:水材质为珍珠乳白(第十一批,实例.png;高不透明度修复清晨/正午隐形);
-  // 深度不写入,液桥伸入液滴的内部段由 aFade 透明隐藏(第十一批任务②),
-  // 不依赖深度遮挡
+  // 液滴写深度(见 dropletMat),液桥滴内段/滴后段由深度测试真实遮挡(2026-09-10
+  // 二次整改),aFade 仅承担出场边缘软化
   dropletMesh.renderOrder = 5;
   scene.add(dropletMesh);
 
@@ -909,7 +915,8 @@ function mountViewer(
         const rise = Math.min(smooth01(dA / blendA), smooth01(dB / blendB));
         const rr =
           Math.max(free * rise * thin * thick * visK, 1e-5);
-        // 滴内段隐藏因子:交点前 FADE_START 段全透明 → 交点处升满(任务②)
+        // 出场边缘软化:交点前 FADE_START 段全透明 → 交点处升满(主遮挡由
+        // 液滴 depthWrite 深度剔除承担,见 dropletMat)
         const fade = Math.min(
           smooth01(
             (dA / surfA - BRIDGE_FADE_START) / (1 - BRIDGE_FADE_START),

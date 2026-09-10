@@ -122,7 +122,8 @@ describe("任务② 液桥伸入液滴 + 曲面化融合(第十一批整改:两�
     expect(BRIDGE_TIP_SURF).toBeCloseTo(0.866, 3); // 半球面与轴高解析交点(√3/2)
     expect(BRIDGE_TIP_DEEP).toBeLessThan(BRIDGE_TIP_SURF);
     expect(BRIDGE_TIP_DEEP).toBeGreaterThanOrEqual(0.4); // 深入液滴内部
-    expect(BRIDGE_FADE_START).toBeGreaterThan(0);
+    // 滴内段完全隐藏(委托方二次整改):aFade 起升点 ≥0.7,滴内前 70% 全透明
+    expect(BRIDGE_FADE_START).toBeGreaterThanOrEqual(0.7);
     expect(BRIDGE_FADE_START).toBeLessThan(1);
     // 两端适当放大(委托方第十一批整改):端径 ≥0.2r(非细杆)、≥3×颈径(漏斗形)
     expect(BRIDGE_END_FRAC).toBeGreaterThanOrEqual(0.2);
@@ -133,10 +134,15 @@ describe("任务② 液桥伸入液滴 + 曲面化融合(第十一批整改:两�
     expect(BRIDGE_BLEND_EXTEND).toBeLessThanOrEqual(2);
   });
 
-  it("桥 shader 接入 aFade(滴内段 alpha×vFade 隐藏),倒角在表面交点完成", () => {
+  it("桥 shader 接入 aFade(出场边缘软化),倒角在表面交点完成", () => {
     expect(LUX_BRIDGE_VERT).toContain("attribute float aFade");
     expect(LUX_BRIDGE_VERT).toContain("vFade = aFade");
     expect(mainBody(LUX_BRIDGE_FRAG)).toContain("* vFade");
+  });
+
+  it("液滴写深度 = 滴内/滴后桥段真实遮挡(委托方二次整改「隐藏内部段」主遮挡)", () => {
+    const src = readFileSync(fileURLToPath(new URL("./viewer.ts", import.meta.url)), "utf8");
+    expect(src).toContain("depthWrite: true, // 珍珠近不透明");
   });
 
   it("悬浮态视觉抖动修复:渲染底面 = 物理平滑 z−r,不再直用原始场高 totalHeight", () => {

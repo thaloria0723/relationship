@@ -738,7 +738,7 @@ void main() {
   col = mix(col, col * 1.3, vEmph); // 高亮:温和变亮(减弱)
   col = applyGrade(col);
   col = applyMist(col, vW);
-  // alpha × vFade:液滴内部段透明隐藏(任务②),表面交点外恢复满值
+  // alpha × vFade:出场边缘软化(滴内主遮挡由液滴 depthWrite 深度剔除承担)
   float alpha = mix(uBridgeOpacity, uBridgeHiOpacity, vEmph) * vFade;
   gl_FragColor = vec4(col, alpha);
 }
