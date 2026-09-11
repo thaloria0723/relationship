@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>B 组效果验证 · 七效果(一次性验证页)</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+      }
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+      .hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        background: rgba(20, 24, 32, 0.62);
+        border: 1px solid rgba(200, 210, 230, 0.35);
+        padding: 10px 12px;
+        font-size: 12px;
+        line-height: 1.7;
+        color: #e8ecf4;
+        user-select: none;
+        backdrop-filter: blur(6px);
+      }
+      .hud b {
+        font-weight: 600;
+      }
+      .hud .row {
+        display: flex;
+        gap: 8px;
+        justify-content: space-between;
+        min-width: 180px;
+      }
+      .hud .btns {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+        flex-wrap: wrap;
+      }
+      .hud button {
+        font: inherit;
+        font-size: 11px;
+        padding: 3px 8px;
+        border: 1px solid rgba(200, 210, 230, 0.4);
+        background: rgba(60, 68, 84, 0.6);
+        color: #e8ecf4;
+        cursor: pointer;
+      }
+      .hud button:hover {
+        background: rgba(90, 100, 120, 0.7);
+      }
+      .hud button.lux-active {
+        background: #e8ecf4;
+        color: #1a2030;
+        border-color: #e8ecf4;
+      }
+      #gray-error {
+        display: none;
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: 70vw;
+        background: #fff;
+        border: 1px solid #b00020;
+        color: #b00020;
+        padding: 10px 14px;
+        font-size: 13px;
+        white-space: pre-wrap;
+      }
+      #fx-caption {
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid rgba(70, 84, 110, 0.5);
+        padding: 8px 14px;
+        font-size: 13px;
+        line-height: 1.65;
+        color: #1a2030;
+        white-space: pre;
+        text-align: left;
+        max-width: 78vw;
+      }
+      /* 文字叠层(HTML 方案,labels.ts 创建):在场 = 实线底牌(人名),
+         灰滴 = 灰调虚线牌(已退场说明 / 「未知关系」),随浮现渐显 */
+      #fx-labels {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        overflow: hidden;
+      }
+      .fx-label {
+        position: absolute;
+        left: 0;
+        top: 0;
+        font-size: 12px;
+        line-height: 1;
+        padding: 3px 9px;
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .fx-label.name {
+        background: rgba(20, 24, 32, 0.58);
+        border: 1px solid rgba(200, 210, 230, 0.45);
+        color: #f2f5fa;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+      }
+      .fx-label.gone,
+      .fx-label.unknown {
+        background: rgba(96, 102, 114, 0.38);
+        border: 1px dashed rgba(200, 210, 230, 0.35);
+        color: rgba(226, 230, 238, 0.78);
+      }
+      .legend {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        font-size: 11px;
+        color: rgba(232, 236, 244, 0.85);
+        text-align: right;
+        line-height: 1.6;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <div id="fx-caption"></div>
+
+    <div class="hud">
+      <b>B 组效果验证</b>
+      <div class="row"><span>fps</span><span id="gray-fps">—</span></div>
+      <div class="row"><span>simTime (s)</span><span id="gray-time">0.00</span></div>
+      <div class="row"><span>固定步数</span><span id="gray-steps">0</span></div>
+      <div class="row"><span>波场能量</span><span id="gray-energy">—</span></div>
+      <div class="row"><span>液滴数</span><span id="gray-droplets">—</span></div>
+      <div class="row"><span>聚合次数</span><span id="gray-merges">—</span></div>
+      <div class="btns">
+        <button id="gray-btn-pause">暂停</button>
+        <button id="gray-btn-step">单步</button>
+        <button id="gray-btn-reset">重置</button>
+        <button id="gray-btn-wire">线框:关</button>
+        <button id="gray-btn-drop">落滴</button>
+        <button id="gray-btn-pair">落桥对</button>
+        <button id="gray-btn-net">网络</button>
+      </div>
+      <div class="btns" id="fx-btns"></div>
+      <div class="btns">
+        <button id="lux-btn-dawn" class="lux-active">清晨</button>
+        <button id="lux-btn-noon">正午</button>
+        <button id="lux-btn-dusk">傍晚</button>
+        <button id="lux-btn-night">深夜</button>
+      </div>
+    </div>
+
+    <div id="gray-error"></div>
+
+    <div class="legend">
+      1 融合 · 2 拉扯 · 3 对撞 · 4 暗流 · 5 潜流 · 6 凝结 · 7 死亡 · 8 聚焦 · 0 关 · 空格重播<br />
+      一次性验证页(建在 web/ 的副本上,不改生产源码)<br />
+      鼠标拖拽旋转 / 滚轮缩放 · Esc 退出聚焦
+    </div>
+
+    <script type="module" src="/src/fxspike/main.ts"></script>
+  </body>
+</html>

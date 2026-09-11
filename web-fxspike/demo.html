@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>水体物理仿真 · 演示时间线</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+      }
+      #app {
+        width: 100%;
+        height: 100%;
+      }
+      .hud {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid #6e6e6e;
+        padding: 10px 12px;
+        font-size: 12px;
+        line-height: 1.7;
+        color: #2a2a2a;
+        user-select: none;
+      }
+      .hud b {
+        font-weight: 600;
+      }
+      .hud .row {
+        display: flex;
+        gap: 8px;
+        justify-content: space-between;
+        min-width: 180px;
+      }
+      .hud .btns {
+        display: flex;
+        gap: 6px;
+        margin-top: 8px;
+      }
+      .hud button {
+        font: inherit;
+        font-size: 11px;
+        padding: 3px 8px;
+        border: 1px solid #6e6e6e;
+        background: #e8e8e8;
+        color: #2a2a2a;
+        cursor: pointer;
+      }
+      .hud button:hover {
+        background: #dcdcdc;
+      }
+      #gray-error {
+        display: none;
+        position: fixed;
+        top: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: 70vw;
+        background: #fff;
+        border: 1px solid #b00020;
+        color: #b00020;
+        padding: 10px 14px;
+        font-size: 13px;
+        white-space: pre-wrap;
+      }
+      #gray-caption {
+        display: none;
+        position: fixed;
+        bottom: 48px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: 80vw;
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid #6e6e6e;
+        padding: 8px 16px;
+        font-size: 14px;
+        color: #1a1a1a;
+        text-align: center;
+      }
+      .legend {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        font-size: 11px;
+        color: #4a4a4a;
+        text-align: right;
+        line-height: 1.6;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <div class="hud">
+      <b>水体灰模 · 演示时间线(§7 验收脚本)</b>
+      <div class="row"><span>fps</span><span id="gray-fps">—</span></div>
+      <div class="row">
+        <span>simTime (s)</span><span id="gray-time">0.00</span>
+      </div>
+      <div class="row"><span>固定步数</span><span id="gray-steps">0</span></div>
+      <div class="row">
+        <span>液滴数</span><span id="gray-droplets">—</span>
+      </div>
+      <div class="row">
+        <span>聚合次数</span><span id="gray-merges">—</span>
+      </div>
+      <div class="row">
+        <span>波场能量</span><span id="gray-energy">—</span>
+      </div>
+      <div class="btns">
+        <button id="gray-btn-pause">暂停</button>
+        <button id="gray-btn-step">单步</button>
+        <button id="gray-btn-reset">重播</button>
+        <button id="gray-btn-wire">线框:开</button>
+        <button id="gray-btn-drop">落滴</button>
+      </div>
+    </div>
+
+    <div id="gray-caption"></div>
+    <div id="gray-error"></div>
+
+    <div class="legend">
+      灰模:零灯光零颜色,仅几何<br />
+      演示脚本按 §7 时间线自动播放<br />
+      鼠标拖拽旋转 / 滚轮缩放(观察用)
+    </div>
+
+    <script type="module" src="/src/demo.ts"></script>
+  </body>
+</html>

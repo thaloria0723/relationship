@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>水滴关系网</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #c8c8c8;
+        color: #2a2a2a;
+        font-family: ui-monospace, Menlo, Consolas, monospace;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .card {
+        border: 1px solid #6e6e6e;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 28px 32px;
+        max-width: 560px;
+        line-height: 1.8;
+        font-size: 14px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 12px;
+      }
+      a {
+        color: #1f4e79;
+      }
+      .dim {
+        color: #4a4a4a;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 模块③ 已落地光影版本一:luxview.html(灰模页保留作物理验收) -->
+    <div class="card">
+      <h1>水滴关系网</h1>
+      <p>
+        当前可看的页面:<br />
+        → <a href="/luxview.html">luxview.html · 光影渲染(四时段水材质)</a>(推荐入口)<br />
+        → <a href="/demo.html">demo.html · §7 验收时间线自动播放</a><br />
+        → <a href="/grayview.html">grayview.html · 灰模手动操作(物理验收)</a>
+      </p>
+      <p class="dim">
+        测试:<code>cd web &amp;&amp; npm test</code>;构建:<code>npm run build</code>
+      </p>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
