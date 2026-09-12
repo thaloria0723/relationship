@@ -1,0 +1,71 @@
+/* ============================================================
+ * 阅读器层样式(HTML 叠层):文字叠层 v3 + 章节滑块
+ *
+ * 恢复自 05bce95 的验证页(web/fxspike.html);验证页已按委托方指示删除,
+ * 样式随特性留档在此 —— 接入生产页面时 `@import` 或原样并入即可。
+ * 配套逻辑:labels.ts(文字叠层)/ tension.ts(张力·滑块规则)。
+ * 两条既有验收标准(委托方 2026-09-12):① 与画面风格一致、能融入;② 清晰可见。
+ * ============================================================ */
+
+/* ---- 文字叠层 v3:无底牌无边框,对比度全靠光晕描边 ----
+ * 字色按「字落在什么上面」选:
+ *   · 名字(.name)落在珍珠亮滴上(日夜液滴都是亮球)→ 深墨青字 + 米白微晕;
+ *   · 灰滴的关系说明/未知关系(.gone/.unknown)落在偏暗灰滴上 → 月光淡银 + 暗晕。
+ * 锚点 = 滴心(文字压在液滴上),字号由 labels.ts 按投影半径自适应。 */
+#fx-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.fx-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+.fx-label.name {
+  color: rgba(30, 44, 68, 0.96);
+  text-shadow:
+    0 0 3px rgba(246, 248, 244, 0.95),
+    0 0 6px rgba(246, 248, 244, 0.8),
+    0 1px 1px rgba(246, 248, 244, 0.9);
+}
+.fx-label.gone,
+.fx-label.unknown {
+  color: rgba(214, 224, 240, 0.95);
+  text-shadow:
+    0 0 3px rgba(8, 14, 26, 0.9),
+    0 0 7px rgba(8, 14, 26, 0.75),
+    0 1px 1px rgba(8, 14, 26, 0.8);
+}
+
+/* ---- 章节滑块(视觉规格 §8.4 交互规则;规则实现见 tension.ts SliderGate) ---- */
+#chapter-box {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(20, 24, 32, 0.62);
+  border: 1px solid rgba(200, 210, 230, 0.35);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: #e8ecf4;
+  user-select: none;
+  backdrop-filter: blur(6px);
+}
+#chapter-slider {
+  width: 140px;
+  accent-color: #e8ecf4;
+}
+#chapter-readout {
+  font-size: 11px;
+  opacity: 0.9;
+}
