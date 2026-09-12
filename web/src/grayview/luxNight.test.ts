@@ -50,24 +50,34 @@ describe("深夜生物荧光海岸 · 海岸形态(2026-09-09 第九批重做)",
     expect(LUX_BOTTOM_FRAG).toContain("sqrt(1.0 + slope * slope)"); // 线宽不随坡度变化
   });
 
-  it("亮度:蓝白窄核心 + 指数辉光裙摆 + 宽域弱蓝晕 + 慢速非同步呼吸(幅度深)", () => {
+  it("亮度:蓝白窄核心 + 指数辉光裙摆 + 宽域弱蓝晕 + 慢速非同步呼吸(调制深度受限)", () => {
     expect(LUX_BOTTOM_FRAG).toContain("exp(-dn * dn * 0.7)"); // 高斯窄核心
     expect(LUX_BOTTOM_FRAG).toContain("exp(-dn * 0.18)"); // 指数辉光裙摆
     expect(LUX_BOTTOM_FRAG).toContain("exp(-dn * 0.055)"); // 宽域弱蓝晕(水体深蓝感)
-    expect(LUX_BOTTOM_FRAG).toContain("0.55 + 0.45 * sin"); // 呼吸幅度深(局部近熄灭)
+    // 频闪整改(2026-09-12):呼吸幅度 0.45 → 0.30 —— 0.55±0.45 的「局部近熄→全亮」
+    // 与颗粒 tw/life 快端周期(~6s)叠加 = 整条岸线每隔数秒爆白(委托方实测)。
+    // 意图保留:仍是慢速非同步呼吸,只是调制深度不允许回到全幅。
+    expect(LUX_BOTTOM_FRAG).toContain("0.55 + 0.30 * sin");
     expect(LUX_BOTTOM_FRAG).toContain("breathe");
     expect(LUX_BOTTOM_FRAG).toContain("kb * 2.6"); // 带间相位错开 → 非同步
     expect(LUX_BOTTOM_FRAG).toContain("wxz.x * 4.0"); // 沿线分段相位 → 非同步
+    // 核心峰值钳制:呼吸到峰时核心乘数原可达 ~1.0(近白体色叠 bloom = 爆白)
+    expect(LUX_BOTTOM_FRAG).toContain(
+      "min(core * (0.45 + 0.55 * breathe), 0.72)",
+    );
   });
 
   it("颗粒:随边界线一同运动(随动坐标系)+ 紧贴亮线密集近白、向外缓慢稀疏变暗", () => {
     expect(LUX_BOTTOM_FRAG).toContain("out float kb, out float zeta"); // 输出随动坐标
     expect(LUX_BOTTOM_FRAG).toContain("vec2(wxz.x, zeta) / uDotCell"); // 格点取在随动坐标系 → 光点贴线同行
     expect(LUX_BOTTOM_FRAG).toContain("(0.10 + 0.90 * exp(-dn * 0.30)) * clump"); // 线处最密,向外缓慢稀疏
-    // 第十一批整改:颗粒峰值亮度下调(1.15/0.9)——大颗粒近白色,原峰值 HDR≈6.8
+    // 第十一批整改:颗粒峰值亮度下调(1.5 → 1.15)——大颗粒近白色,原峰值 HDR≈6.8
     // 叠 bloom 为「约 6 秒一次的白色闪光」(tw/life 周期快端 ≈6.3s,毫米级颗粒仅近距可见)
-    expect(LUX_BOTTOM_FRAG).toContain("pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.15");
-    expect(LUX_BOTTOM_FRAG).toContain("(0.85 + 0.9 * big)");
+    // 频闪整改(2026-09-12):实测仍频闪 → pBrt 1.15→1.0、tw 幅度 0.4→0.28、
+    // 大颗粒增益 0.9→0.5;「闪砾」感(逐粒相位随机)保留,整片同爆的量不允许回来。
+    expect(LUX_BOTTOM_FRAG).toContain("pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.0");
+    expect(LUX_BOTTOM_FRAG).toContain("(0.85 + 0.5 * big)");
+    expect(LUX_BOTTOM_FRAG).toContain("0.72 + 0.28 * sin"); // tw 摆幅压缩(周期不变)
     expect(LUX_BOTTOM_FRAG).toContain("whiteMix = clamp(0.3 + 0.6 * exp(-dn * 0.4)"); // 线处近白
     expect(LUX_BOTTOM_FRAG).toContain("mix(0.0015, 0.0045, big)"); // 半径绝对米数(≥1px 恒可见)
     expect(LUX_BOTTOM_FRAG).toContain("0.45 + 0.55 * vnoise"); // 低频热点(成片闪砾,随线同行)

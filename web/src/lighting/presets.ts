@@ -107,17 +107,22 @@ const NOON: LightingPreset = {
   sunElevationDeg: 78,
   sunAzimuthDeg: 15,
   sunColor: [1.0, 0.98, 0.94],
-  sunIntensity: 3.3,
+  /** 正午降亮标定(委托方 2026-09-12「正午的水面偏亮」):3.3→2.75,仍全表最强。
+   *  实测:正午水面区(池底直视)整帧均值 192.9/255、蓝度 21 → 与清晨 171/傍晚 181
+   *  不同档;场景 HDR 整体压在 ACES 肩部 → 单个参数杠杆弱(太阳归零也仅 −13%),
+   *  故按「量—调—再量」做**组合标定**(本项 + causticScale/exposure/bottomAlbedo/
+   *  bottomEdgeLift),四项合计把水面压到 178.7、蓝度升到 29(见 §13 证据帧)。 */
+  sunIntensity: 2.75,
   ambSky: [0.45, 0.62, 0.85],
   ambGround: [0.18, 0.22, 0.25],
   skyHorizon: [0.72, 0.84, 0.98],
   skyZenith: [0.25, 0.48, 0.88],
   mistDensity: 0,
   mistColor: [0.8, 0.85, 0.9],
-  causticScale: 1.35,
+  causticScale: 1.0, // 正午降亮标定:1.35→1.0(仍全表最强;焦散是加白光,是「惨白」的加性来源)
   glintGain: 1.5,
   shadowStrength: 0.6,
-  exposure: 1.0,
+  exposure: 0.5, // 正午降亮标定:1.0→0.5(实测唯一能把过曝 HDR 拉回中间调的杠杆)
   saturation: 1.15,
   contrast: 1.0,
   bloomStrength: 0.08,
@@ -127,13 +132,14 @@ const NOON: LightingPreset = {
   nightDotColor: [0, 0, 0],
   waterBody: [0.1, 0.36, 0.43],
   /** 浅蓝水底(委托方 2026-09-09)。正午光照强,albedo×光照在 ACES 前达 2-3
-   *  必然压成惨白;按强光标定取深系数,屏显(色调映射后)才是浅蓝 */
-  bottomAlbedo: [0.1, 0.22, 0.42],
+   *  必然压成惨白;按强光标定取深系数,屏显(色调映射后)才是浅蓝。
+   *  2026-09-12 正午降亮标定:再深一档(蓝分量保留、红绿收紧 → 蓝度 +8) */
+  bottomAlbedo: [0.08, 0.19, 0.38],
   background: [0.45, 0.63, 0.9],
   surfaceTint: [0.58, 0.79, 0.94], // 淡蓝(原 shader 写死值时段化,观感不变)
   surfaceTintAmt: 0.68, // 第十一批 0.55→0.68:水面更蓝一档,珍珠液滴对比更强(委托方「可视程度低」整改,允许改水面色)
   mistLayer: 0,
-  bottomEdgeLift: 0.16,
+  bottomEdgeLift: 0.06, // 正午降亮标定:0.16→0.06(灰白池壁提亮是「洗白」来源之一;实测同时抬蓝度)
 };
 
 const DUSK: LightingPreset = {

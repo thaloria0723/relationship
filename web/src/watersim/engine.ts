@@ -185,6 +185,25 @@ export class WaterEngine implements DropletHost {
   }
 
   /**
+   * 立即移除一颗液滴(B 组效果验证:「死亡退场」)。
+   *
+   * 与聚合走**同一条通路**:交换删除 + 液桥端点重映射 —— 不能只把网格藏起来,
+   * 否则它仍留在 `setFloating` 的 `uDropPos/uDropRad` 里,水底软影与液滴焦散
+   * 会继续留在原位(委托方实测:「液滴消失了,但投射在水底的光影未消失」)。
+   *
+   * ⚠ **交换删除会让索引位移**:末位滴搬进 i,调用方持有的液滴索引随之失效。
+   * 返回是否真的删掉了(越界为 false)。
+   */
+  removeDroplet(i: number): boolean {
+    const d = this.droplets.state;
+    if (i < 0 || i >= d.count) return false;
+    if (this.focusCenter === i) return false; // 聚焦中心滴不允许在演出中被删(状态机自洽)
+    this.droplets.removeAt(i);
+    this.bridges.remapOnRemove(i);
+    return true;
+  }
+
+  /**
    * 渲染帧驱动入口:按真实帧时长累积,执行 0..maxSubsteps 个固定步。
    * 触顶时钳制累加器(防螺旋死亡:渲染跟不上时丢弃积压,时间不追赶)。
    */

@@ -374,15 +374,21 @@ vec3 nightCoast(vec2 wxz, vec3 col) {
   float kb = 0.0;
   float zeta = 0.0;
   float dn = coastDist(wxz, uTime, kb, zeta); // dn:到最近边界距离(单位=局部半宽)
-  // 辉光呼吸:慢(周期 ~19s),相位随带序 + 沿线位置 → 各段非同步;
-  // 幅度 0.55±0.45 → 局部可近乎熄灭(参考图线亮度沿走向起伏大)
-  float breathe = 0.55 + 0.45 * sin(uTime * 0.33 + kb * 2.6 + wxz.x * 4.0);
+  // 辉光呼吸:慢(周期 ~19s),相位随带序 + 沿线位置 → 各段非同步。
+  // ⚠ 频闪整改(2026-09-12 委托方:深夜整个界面每隔数秒白色频闪):原幅度
+  //   0.55±0.45(局部近熄→全亮)与颗粒 tw/life 快端周期(~6s)叠加,
+  //   整条岸线周期性爆白(实测抓帧确认)。压缩调制深度(±0.30)保「缓呼吸」
+  //   读感,去掉爆量;形态(线束/蜿蜒/推进)不受影响。
+  float breathe = 0.55 + 0.30 * sin(uTime * 0.33 + kb * 2.6 + wxz.x * 4.0);
   float core = exp(-dn * dn * 0.7);    // 蓝白窄核心(高斯)
   float halo = exp(-dn * 0.18) * 0.5;  // 外围蓝色辉光裙摆(指数)
   float wash = exp(-dn * 0.055) * 0.1; // 宽域弱蓝晕:线间水体深蓝感(随线距衰减)
   col += uNightDotColor * (halo * breathe + wash);
+  // 核心峰值钳制(频闪整改另一半):呼吸到峰时核心乘数原可达 ~1.0(近白体色
+  // 叠 bloom = 爆白)。钳到 0.72 只削「涌起那一瞬」的峰,呼吸中低段(日常形态)
+  // 不受影响 —— 亮暗对比从 2:1 压到 ~1.2:1,频闪读感消失。
   col += mix(uNightDotColor, vec3(0.88, 0.95, 1.0), 0.72)
-       * (core * (0.45 + 0.55 * breathe));
+       * min(core * (0.45 + 0.55 * breathe), 0.72);
   // 发光颗粒:格点取在最近波列的**随动坐标系 (x, ζ)**(ζ=该线的有符号法向偏移)
   // → 线的法向推进/涌浪/蜿蜒全部被颗粒继承,光点贴线同行(委托方 2026-09-09);
   // 紧贴亮线处最密最白,向外缓慢稀疏变暗(委托方 2026-09-09 三次反馈:
@@ -406,15 +412,18 @@ vec3 nightCoast(vec2 wxz, vec3 col) {
   float pt = smoothstep(pr, 0.0, pd);
   // 热点(成片闪砾,随线同行)+ 近密近亮、向外缓慢稀疏变慢衰减。
   // ⚠ 第十一批整改:峰值亮度 1.5/1.5 → 1.15/0.9——大颗粒近白色,原峰值 HDR≈6.8
-  // 叠加 bloom 后为「每隔约 6 秒的白色闪光」(tw/life 周期快端 ≈6.3s,颗粒毫米级
-  // → 仅俯视近距可见,委托方实测);压峰后颗粒仍亮、柔和不爆。
+  //   叠加 bloom 后为「每隔约 6 秒的白色闪光」(tw/life 周期快端 ≈6.3s,颗粒毫米级
+  //   → 仅俯视近距可见,委托方实测);压峰后颗粒仍亮、柔和不爆。
+  // ⚠ 频闪整改(2026-09-12,见上方 breathe 注):实测仍频闪 → 再压三处:
+  //   pBrt 1.15→1.0;tw 幅度 0.4→0.28(周期不变,摆幅约减半);大颗粒增益
+  //   0.9→0.5。逐粒相位随机的「闪砾」感保留,整片同爆的量没了。
   float clump = 0.45 + 0.55 * vnoise(vec2(wxz.x * 2.9 + 7.3, zeta * 2.1)); // patch 为 GLSL 保留字
   float dens = (0.10 + 0.90 * exp(-dn * 0.30)) * clump; // 线处最密,向外缓慢稀疏
-  float pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.15;  // 线处最亮,缓慢变暗
+  float pBrt = (0.45 + 0.55 * exp(-dn * 0.25)) * 1.0;   // 线处最亮,缓慢变暗
   float whiteMix = clamp(0.3 + 0.6 * exp(-dn * 0.4), 0.0, 0.95); // 线处近白,远处蓝
-  float tw = 0.6 + 0.4 * sin(uTime * (0.45 + 0.5 * hb) + ha * 40.0); // 亮度缓变
+  float tw = 0.72 + 0.28 * sin(uTime * (0.45 + 0.5 * hb) + ha * 40.0); // 亮度缓变
   vec3 pCol = mix(uNightDotColor, vec3(0.93, 0.97, 1.0), whiteMix);
-  col += pCol * (pt * life * dens * tw * pBrt * (0.85 + 0.9 * big));
+  col += pCol * (pt * life * dens * tw * pBrt * (0.85 + 0.5 * big));
   return col;
 }
 // 动态焦散网 v4(2026-09-09 第十批,委托方指令:删除清晨/正午/傍晚 ∇²h 光纹,
@@ -609,13 +618,28 @@ void main() {
  *  任务④放大扭曲水底光纹)、vLocalY(单位几何高度,接触亮环用)。 */
 export const LUX_DROPLET_VERT = /* glsl */ `
 #define LENS_H 1.0
+uniform float uTime;
 attribute float aEps;
+// ---- B 组效果验证(web-fxspike):逐实例效果通道 ----
+// aFx.x = 沸腾强度 0..1(凝结载入段 / 死亡第一阶段)
+// aFx.y = 抖动溶解进度 0..1(死亡收尾;**只走 discard,不碰 alpha**)
+// aFx.z = 未在场灰滴度 0..1(聚焦:已退场/未出场 → 灰、无动态关系表达)
+attribute vec3 aFx;
 varying vec3 vN;
 varying vec3 vW;
 varying vec3 vTint;
 varying vec2 vCenter;  // 滴心世界 xz(instance 平移分量;透镜以滴心为采样基准)
 varying float vR;      // 实例半径(instance 基向量长;等效透镜光程 = vR×MAG)
 varying float vLocalY; // 单位几何高度 y∈[0,1](0=底缘,1=顶)
+varying float vBoil;
+varying float vDissolve;
+varying float vAbsent;
+// 顶点噪声(仅沸腾抖动用;frag 的 COMMON_HELPERS 不进 vert,这里自带一个)
+float fxHash13(vec3 p) {
+  p = fract(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
 void main() {
   vTint = vec3(1.0);
   #ifdef USE_INSTANCING_COLOR
@@ -623,11 +647,25 @@ void main() {
   #endif
   vCenter = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xz;
   vR = length(instanceMatrix[0].xyz);
+  vBoil = aFx.x;
+  vDissolve = aFx.y;
+  vAbsent = aFx.z;
+  // 沸腾:沿法线的高频抖动(幅度随 aFx.x 上升)。
+  // **只动顶点,不动透明度** —— 液滴是珍珠不透明 + depthWrite,任何 alpha 淡出
+  // 都会让「看不见的球继续剔除身后的桥」(第十一批刚修好的洞),故沸腾期与
+  // 汽化期一律不碰 alpha,收尾交给 discard(见 frag)。
+  vec3 pos = position;
+  if (aFx.x > 0.001) {
+    float n1 = fxHash13(floor(position * 16.0) + floor(uTime * 24.0) * 0.37);
+    pos += normal * ((n1 - 0.5) * 0.11 * aFx.x);
+  }
+  // 接触亮环用**几何**高度而非位移后高度:沸腾期环带不应跟着顶点抖动(它标的是
+  // 液滴与水面/球体的接触位置,不是噪声的产物)
   vLocalY = position.y;
   // 实例变换 = 平移 · 缩放(r, r·LENS_H·(1−ε), r),无旋转 →
   // 法线修正 = y 除以 LENS_H·(1−ε)(透镜厚度方向非均匀缩放)
   vN = normalize(vec3(normal.x, normal.y / max(LENS_H * (1.0 - aEps), 0.075), normal.z));
-  vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+  vec4 wp = modelMatrix * instanceMatrix * vec4(pos, 1.0);
   vW = wp.xyz;
   gl_Position = projectionMatrix * viewMatrix * wp;
 }
@@ -643,54 +681,90 @@ varying vec3 vTint;
 varying vec2 vCenter;
 varying float vR;
 varying float vLocalY;
+varying float vBoil;
+varying float vDissolve;
+varying float vAbsent;
 // 透镜等效光程 / 半径(第十一批任务④):GPU Gems 2 ch.19「折射模拟 = 折射线 ×
 // 等效光程」的光程缩放;原型 index-wave.html LENS_DEPTH(1.9)同一思想。液滴口径
 // ~5cm 对焦散网胞 ~29cm,光程必须数倍于 r 才能在滴内铺开可读的网纹窗口(放大)。
 #define CAUSTIC_LENS_MAG 3.2
 void main() {
+  // ---- 抖动溶解(hashed alpha discard):死亡收尾 ----
+  // 为什么**不能用 alpha 淡出**:液滴是珍珠不透明 + depthWrite=true。
+  //   保留 depthWrite 而 alpha→0 → 看不见的球继续剔除身后的桥,「桥凭空断一截」
+  //     (第十一批二次整改刚修好的 bug 反向复现);
+  //   改 depthWrite=false → 桥/雾叠画穿透球面(二次整改已修的问题)。
+  // discard 的片元**既不写颜色也不写深度**,任意进度下深度都正确 → 不留洞。
+  // 做法与 three 官方 alphahash 一致(Wyman 2017 Hashed Alpha Testing)。
+  if (vDissolve > 0.001) {
+    if (hash12(floor(gl_FragCoord.xy)) < vDissolve) discard;
+  }
   vec3 n = normalize(vN);
   vec3 v = normalize(cameraPosition - vW);
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
+  vec3 col;
+  float alpha;
   // ---- 深夜:发光小球(第十一批任务③;委托方整改:亮度下调——1.9/1.1/2.5
   // → 1.15/0.55/1.2,仍高于 bloom 阈值出柔光晕,不再白爆成团;GGX 项钳制——
   // 液滴随波晃动法线扫过月亮方向时 D 峰(数值无界)造成网络级白色闪光) ----
   if (uNightDots > 0.5) {
     float core = 0.75 + 0.25 * ndl;
     float rim = pow(1.0 - nov, 2.0);
-    vec3 col = vec3(1.0, 0.70, 0.30) * (1.15 * core)
-             + vec3(1.0, 0.88, 0.62) * (rim * 0.55)
-             + vec3(1.0, 0.85, 0.55) * min(ggxSpec(n, v, uSunDir, 0.22) * 1.2, 0.25);
-    col *= vTint;
-    col = applyGrade(col);
-    gl_FragColor = vec4(col, 0.96);
-    return;
+    col = vec3(1.0, 0.70, 0.30) * (1.15 * core)
+        + vec3(1.0, 0.88, 0.62) * (rim * 0.55)
+        + vec3(1.0, 0.85, 0.55) * min(ggxSpec(n, v, uSunDir, 0.22) * 1.2, 0.25);
+    alpha = 0.96;
+  } else {
+    // ---- 白天:珍珠乳白小球(2026-09-10 第十一批;修复清晨/正午可视程度低——
+    // 旧材质与液面同套透明水公式,alpha 0.15-0.7 + uTint 洗色)----
+    // 奶白体:uTint/uTintAmt 已时段化 → 清晨粉白/正午蓝白/傍晚亮白
+    vec3 milkBase = mix(vec3(0.88, 0.90, 0.93), uTint * 1.25, uTintAmt * 0.45);
+    vec3 milk = milkBase * ((0.55 + 0.45 * ndl) * 1.35);
+    // 透镜折射:以滴心为基准的等效光程(任务④;边缘压缩全场景、中心放大光纹)
+    vec3 rd = refract(-v, n, uEta);
+    if (dot(rd, rd) < 1e-5) rd = normalize(vec3(n.x, -0.35, n.z)); // 掠射 TIR 兜底
+    float lensPath = max(vR, 1e-4) * CAUSTIC_LENS_MAG;
+    vec2 bpos = vCenter + rd.xz * (lensPath / max(-rd.y, 0.3));
+    vec3 lensCol = shadeBottom(bpos) * 1.35; // ×1.35 透镜聚光(光纹过滴更亮)
+    // 奶白为壳、折射水底为核:奶白占比 0.45,核心透出时段水色
+    col = mix(lensCol, milk, 0.45);
+    col = mix(col, skyColor(reflect(-v, n)), F); // Fresnel 边缘环境反射
+    // 高光:锐 GGX(太阳侧亮斑)+ 宽域柔光
+    col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint * 0.9;
+    col += uSunColor * (pow(ndl, 8.0) * 0.10);
+    // 接触亮环(vLocalY 0=底缘)
+    float ringM = smoothstep(0.28, 0.03, vLocalY);
+    col += (milk * 1.4 + uSunColor * 0.15) * (ringM * (0.5 + 0.5 * F));
+    alpha = mix(0.66, 0.94, F); // 珍珠不透明感(垂直俯视也实,不再透成隐形)
   }
-  // ---- 白天:珍珠乳白小球(2026-09-10 第十一批,实例.png;修复清晨/正午
-  // 可视程度低——旧材质与液面同套透明水公式,alpha 0.15-0.7 + uTint 洗色)----
-  // 奶白体:uTint/uTintAmt 已时段化 → 清晨粉白/正午蓝白/傍晚亮白
-  vec3 milkBase = mix(vec3(0.88, 0.90, 0.93), uTint * 1.25, uTintAmt * 0.45);
-  vec3 milk = milkBase * ((0.55 + 0.45 * ndl) * 1.35);
-  // 透镜折射:以滴心为基准的等效光程(任务④;边缘压缩全场景、中心放大光纹)
-  vec3 rd = refract(-v, n, uEta);
-  if (dot(rd, rd) < 1e-5) rd = normalize(vec3(n.x, -0.35, n.z)); // 掠射 TIR 兜底
-  float lensPath = max(vR, 1e-4) * CAUSTIC_LENS_MAG;
-  vec2 bpos = vCenter + rd.xz * (lensPath / max(-rd.y, 0.3));
-  vec3 lensCol = shadeBottom(bpos) * 1.35; // ×1.35 透镜聚光(光纹过滴更亮)
-  // 奶白为壳、折射水底为核(实例.png 蓝核):奶白占比 0.45,核心透出时段水色
-  vec3 col = mix(lensCol, milk, 0.45);
-  col = mix(col, skyColor(reflect(-v, n)), F); // Fresnel 边缘环境反射
-  // 高光:锐 GGX(太阳侧亮斑)+ 宽域柔光(实例.png 亮部高光)
-  col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint * 0.9;
-  col += uSunColor * (pow(ndl, 8.0) * 0.10);
-  // 接触亮环(实例.png 底缘一圈亮环;vLocalY 0=底缘)
-  float ringM = smoothstep(0.28, 0.03, vLocalY);
-  col += (milk * 1.4 + uSunColor * 0.15) * (ringM * (0.5 + 0.5 * F));
+  // ---- B 组效果(web-fxspike):vBoil = 0 时逐字节等价于生产路径 ----
+  if (vBoil > 0.001) {
+    // 沸腾:边缘在烧(借 bloom 出光晕)。**必须钳制** —— 三次白闪整改的教训:
+    // 无界 HDR 项 + 网络级同步 = 整屏白爆。
+    float hotRim = pow(1.0 - nov, 2.0);
+    col += min(vec3(1.0, 0.62, 0.30) * (hotRim * 1.5 * vBoil), 0.5);
+    // 顶点抖动会破法线 → 高光抖动本身是「沸腾」读感的一部分,但锐 GGX 峰值要压
+    col -= uSunColor * (ggxSpec(n, v, uSunDir, 0.14) * uGlint * 0.9) * vBoil * 0.6;
+  }
   col *= vTint;
+  // ---- 未在场灰滴(聚焦;动效 §2.3)----
+  // 已退场/未出场 → 灰。去饱和 + 压暗,留一点冷相免得读成「灰烬」(那是死亡的
+  // 语义)。「无动态关系表达」由宿主侧不给他们出桥来保证,这里只管观感。
+  // ⚠ 灰是规格**专门留给「已退场/未出场」**的语义色 —— 疏远/拉扯不得借用
+  //   (那是「拉扯」分支去饱和只做 0.30 的原因)。
+  if (vAbsent > 0.001) {
+    float lum = dot(col, vec3(0.299, 0.587, 0.114));
+    col = mix(col, vec3(lum) * vec3(0.80, 0.84, 0.92), vAbsent * 0.92);
+  }
   col = applyGrade(col);
-  col = applyMist(col, vW);
-  float alpha = mix(0.66, 0.94, F); // 珍珠不透明感(垂直俯视也实,不再透成隐形)
+  if (uNightDots <= 0.5) col = applyMist(col, vW);
+  // ---- 灰滴要比正常液滴**更透明**(委托方 2026-09-11:灰滴要与正常滴作区别)----
+  // 液滴材质本就是 transparent:true,故这里只降 alpha、**不动 depthWrite** ——
+  // 改 depthWrite 会招回「看不见的球继续剔除身后物」(第十一批那个洞)。
+  // 灰滴在场景里本就孤立(无动态关系表达 → 不出桥),遮挡损失可忽略。
+  alpha *= mix(1.0, 0.42, vAbsent);
   gl_FragColor = vec4(col, alpha);
 }
 `,
@@ -702,13 +776,38 @@ void main() {
 export const LUX_BRIDGE_VERT = /* glsl */ `
 attribute float aEmph;
 attribute float aFade;
+// ---- B 组效果验证(web-fxspike):逐顶点效果通道 ----
+// ⚠ 逐桥状态量**只能用逐顶点属性**:本工程 uniforms 对象被 5 个材质共享
+//   (viewer.ts 里 surfaceMat/dropletMat/bridgeMat/bottomMat/mistMat 同一份),
+//   改一个 uniform 会波及全体。aEmph/aFade 当初就是这么来的,这里是同一条路。
+// aUV    x = 沿桥弧长参数(0..1),y = 周向参数(0..1);init 填一次,静态不更新
+// aSeed  每桥随机相位(0..1)——**去同步**:夜闪三次整改的根因是网络内桥姿态
+//        相近、晃动时同时扫过月亮半向量,故所有时间驱动项必须带每桥不同相位
+// aKind  效果族:0=无 1=流动/气泡(融合·暗流) 2=黯淡(拉扯) 3=湍流 4=潜流
+// aState x=流动强度(>0 双侧往复,<0 单向冲刷) y=气泡量 z=湍流度 w=状态量
+// aGrow  桥的抽出/回缩进度(0=未抽出,1=完整;非效果态恒 1)
+attribute vec2 aUV;
+attribute float aSeed;
+attribute float aKind;
+attribute vec4 aState;
+attribute float aGrow;
 varying vec3 vN;
 varying vec3 vW;
 varying float vEmph;
 varying float vFade;
+varying vec2 vUv;
+varying float vSeed;
+varying float vKind;
+varying vec4 vState;
+varying float vGrow;
 void main() {
   vEmph = aEmph;
   vFade = aFade;
+  vUv = aUV;
+  vSeed = aSeed;
+  vKind = aKind;
+  vState = aState;
+  vGrow = aGrow;
   vN = normal; // CPU 顶点即世界系,径向 = 法线
   vec4 wp = modelMatrix * vec4(position, 1.0);
   vW = wp.xyz;
@@ -724,37 +823,220 @@ varying vec3 vN;
 varying vec3 vW;
 varying float vEmph;
 varying float vFade;
+varying vec2 vUv;
+varying float vSeed;
+varying float vKind;
+varying vec4 vState;
+varying float vGrow;
+// 气泡单元量化:沿轴切 cells 格 → **数量硬上限 = cells/桥**(规格「融合气泡 ≤8/桥」)。
+// 气泡远小于格宽 → fract 回绕天然不可见(不闪不跳);阈值噪声做不到计数,粒子池要另维护上限。
+// 用**减性暗体**而非加性亮环:加性亮环读作「火花/光点」,减性才读作「气泡」;
+// 且减性不进 bloom —— 顺带避开三次白爆整改的纪律。
+/** 气泡场:返回 (泡体, 贴边环) 两个通道。
+ *
+ *  气泡之所以读作气泡,靠的是**边缘那一圈**;只做减性暗体只能读成「暗斑」
+ *  (上一版实测:委托方要「补气泡」,而画面上只有极淡的斑驳)。
+ *  环的原理取自 IQ《Bubbles》的「color -= col.zyx * (1 - smoothstep(...))」那一手
+ *  —— ⚠ 其源码声明**禁止移植**,此处只按原理自行实现,未取用其任何代码。 */
+vec2 fxBubbleField(vec2 uv, float cells, float t, float seed) {
+  float f = uv.x * cells;
+  float cell = floor(f);
+  float local = fract(f);
+  float r1 = hash12(vec2(cell, seed * 37.0));
+  // 半径分布:原 pow(...,3.0) 让绝大多数泡小到看不见(实测整条桥只认得出一个),
+  // 降到 1.8 让「≤8 个泡」都真正可见;上限仍受 cells=8 硬性封顶(规格)。
+  float rad = 0.16 + 0.54 * pow(clamp(hash12(vec2(cell, 7.0 + seed)), 0.0, 1.0), 1.8);
+  float spd = 0.4 + 0.6 * hash12(vec2(cell, 3.0 + seed));
+  float pos = 0.5 + 0.45 * sin(t * spd + r1 * 6.283);
+  float dy = uv.y - hash12(vec2(cell, 11.0 + seed));
+  float d = length(vec2((local - pos) * 2.6, dy * 1.6)) / max(rad, 1e-4);
+  float body = 1.0 - smoothstep(0.55, 1.0, d);                              // 泡内
+  float rim = smoothstep(0.55, 0.95, d) * (1.0 - smoothstep(0.95, 1.30, d)); // 贴边一圈
+  return vec2(body, rim);
+}
 void main() {
   vec3 n = normalize(vN);
   vec3 v = normalize(cameraPosition - vW);
   float nov = max(dot(n, v), 1e-4);
   float F = uF0 + (1.0 - uF0) * pow(1.0 - nov, 5.0);
   float ndl = max(dot(n, uSunDir), 0.0);
+  vec3 col;
+  float alpha;
   // ---- 深夜:暖黄边界线(第十一批任务③;委托方整改:亮度下调——
   // 0.42/1.75/2.0 → 0.28/0.85/0.9,体色微暖可见,rim 亮线柔和不爆;
   // GGX 项钳制——网络内桥姿态相近,晃动时法线同步扫过月亮半向量 →
   // 全网络同时出高光尖峰 = 整网同步白闪(实测抓帧确认),必须钳制) ----
   if (uNightDots > 0.5) {
     float rim = pow(1.0 - nov, 2.2);
-    vec3 col = vec3(1.0, 0.72, 0.32) * (0.28 + 0.85 * rim)
-             + vec3(1.0, 0.88, 0.60) * min(ggxSpec(n, v, uSunDir, 0.18) * 0.9, 0.2);
-    col = applyGrade(col);
-    gl_FragColor = vec4(col, mix(0.38, 0.92, rim) * vFade);
-    return;
+    col = vec3(1.0, 0.72, 0.32) * (0.28 + 0.85 * rim)
+        + vec3(1.0, 0.88, 0.60) * min(ggxSpec(n, v, uSunDir, 0.18) * 0.9, 0.2);
+    alpha = mix(0.38, 0.92, rim) * vFade;
+  } else {
+    // 液桥:透明淡蓝(委托方 2026-09-09「液桥改为透明淡蓝色」)。细水柱光程短 →
+    // 内体按淡蓝水色调制、受光限幅;常态 alpha 0.30(委托方指定值不变)。
+    // 夜晚天空近黑 → 内体随光照自动隐没,只剩月光镜面(深夜分支接管,见上)
+    vec3 lit = uSunColor * (0.25 * ndl) + (uAmbSky + uAmbGround) * 0.6;
+    vec3 body = vec3(0.55, 0.78, 0.95) * lit * 1.5;
+    col = body + skyColor(reflect(-v, n)) * (F * 1.1 + 0.3);
+    col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint;
+    col = mix(col, col * 1.3, vEmph); // 高亮:温和变亮(减弱)
+    alpha = mix(uBridgeOpacity, uBridgeHiOpacity, vEmph) * vFade;
   }
-  // 液桥:透明淡蓝(委托方 2026-09-09「液桥改为透明淡蓝色」)。细水柱光程短 →
-  // 内体按淡蓝水色调制、受光限幅;常态 alpha 0.30(委托方指定值不变)。
-  // 夜晚天空近黑 → 内体随光照自动隐没,只剩月光镜面(深夜分支接管,见上)
-  vec3 lit = uSunColor * (0.25 * ndl) + (uAmbSky + uAmbGround) * 0.6;
-  vec3 body = vec3(0.55, 0.78, 0.95) * lit * 1.5;
-  vec3 col = body + skyColor(reflect(-v, n)) * (F * 1.1 + 0.3);
-  col += uSunColor * ggxSpec(n, v, uSunDir, 0.14) * uGlint;
-  col = mix(col, col * 1.3, vEmph); // 高亮:温和变亮(减弱)
+  // ============================================================
+  // B 组效果(web-fxspike)。vKind = 0 且各通道为 0 时**逐字节等价于生产路径**
+  // (无任何项被激活),这是「166 测试不破」的前提。放在时段分支之后,是为了让
+  // 夜晚也走效果 —— 否则白闪探针测的是基线而不是效果本身。
+  // ============================================================
+  if (vKind > 0.5) {
+    float fxFlow = vState.x;
+    float fxBubbleAmt = vState.y;
+    float fxTurb = vState.z;
+    float fxState = vState.w;
+    // 单向度:暗流(flow<0)为 1,融合(flow>0)为 0
+    float oneWay = clamp(-fxFlow * 1.2, 0.0, 1.0);
+
+    if (vKind < 1.5) {
+      // ---- 1 融合(双侧缓慢往复) / 4 暗流(单向快冲) ----
+      // 双向**不要**用两层反向滚动(读作噪声),用相位往复:波峰走完再走回。
+      // 速率:原为写死的 0.35 rad/s(≈18s 一个来回,读作「几乎不动」)——
+      // 委托方 2026-09-11 要求「提高亮斑移动速度」→ 1.05 rad/s(≈6s 一个来回),
+      // 仍是 §3.1 的「双向缓慢流动」,只是不再慢到看不出在动。
+      float ph = mix(
+        vUv.x * 6.0 - 1.4 * sin(uTime * 1.05 + vSeed * 6.283),
+        vUv.x * 9.0 - uTime * 1.8 * (0.7 + 0.6 * vSeed),
+        oneWay
+      );
+      float flowN = vnoise(vec2(ph * 3.0, vUv.y * 3.0))
+                  + 0.5 * vnoise(vec2(ph * 7.0 + 3.1, vUv.y * 7.0));
+      // 乘性调制:被基色约束 → 天然有界,不新增 HDR 项。
+      // ⚠ **上下都要夹**:flowN∈[0,1.5] 时 (flowN-0.75)*1.4 ∈ [-1.05, 1.05],
+      //    只夹上限会把 col 乘成负数 → 桥上出现黑斑(实测)。
+      col *= 1.0 + clamp(
+        (flowN - 0.75) * 1.4 * clamp(abs(fxFlow), 0.0, 1.0), -0.22, 0.30);
+      if (fxBubbleAmt > 0.001) {
+        float cells = mix(8.0, 16.0, oneWay); // 融合 8(可数) / 暗流 16(密排)
+        vec2 bf = fxBubbleField(vUv, cells, uTime, vSeed);
+        float bA = fxBubbleAmt * mix(1.0, 0.50, oneWay);
+        // 泡体:减性暗体(读作气泡而非亮点,且不进 bloom)。**同样要夹**:减太多会
+        // 穿底,用 min 限幅 + 保底(不把基色减成负)
+        col -= min(vec3(0.26, 0.31, 0.36) * (bf.x * bA), col * 0.35);
+        // 贴边亮环:气泡的唯一强特征(只做暗体只能读成「暗斑」)。加性项必须钳制
+        // (夜闪纪律)。桥的常态 alpha 只有 0.30,纯改色的可见度很有限,故环上
+        // 同时把 alpha 略抬 —— 这是细桥上唯一能真正看清的手段。
+        col += min(vec3(0.62, 0.72, 0.85) * (bf.y * bA), 0.20);
+        alpha = min(alpha * (1.0 + 0.55 * bf.y * bA), 1.0);
+      }
+    } else if (vKind < 2.5) {
+      // ---- 2 拉扯(黯淡) ----
+      // 「黯淡」的字面意思是**失去光泽**,不是失去亮度。三条落地:
+      //   ① 撤掉锐高光 —— 这是「它还是活水」的唯一强证据,撤掉即「湿感退成哑光」;
+      //   ② 轻微去饱和(保色相,避免读成灰色 —— 规格 §2.3 把灰/暗规定给了
+      //      「已退场/未出场」,疏远走灰会与死亡撞语义);
+      //   ③ 适度降透明 → 向背景退,而不是向黑退。
+      // ⚠ 不压暗:亮背景下压暗会拉大与背景的 |ΔL|、反而更抢眼(上版「黑刀片」
+      //    的成因之一)。也**不**混合 uSkyHorizon —— 正午天空比水面还亮,混过去
+      //    等于给桥打光,实测桥比基线更醒目(与「退」的意图正好相反)。
+      float fade = clamp(fxState, 0.0, 1.0);
+      col -= uSunColor * (ggxSpec(n, v, uSunDir, 0.14) * uGlint) * fade * 0.85;
+      float lum = dot(col, vec3(0.299, 0.587, 0.114));
+      col = mix(col, vec3(lum) * vec3(0.90, 0.97, 1.06), fade * 0.30);
+      alpha *= mix(1.0, 0.45, fade);
+    } else if (vKind < 3.5) {
+      // ---- 3 对撞(敌对/冲突) ----
+      // B 组第二轮委托方裁决:原「湍流」三项(液桥极粗 / 边界水花飞溅 / 两滴高频颤动)
+      // **全部作废**,改为——两端同时亮起 → 快速相向推进 → 中心融合 → 消散并冒泡。
+      // 故此处不再有轮廓侵蚀与水沫带(那套是给「沸腾」用的,已随裁决删除)。
+      // 通道:fxTurb = 两端亮斑强度;fxState = 亮斑位置(0.86 两端 → 0.5 中心);
+      //       fxFlow = **中心余晖**强度(融合完留在中心的一团,跨进下一轮衰减)。
+      float clash = clamp(fxTurb, 0.0, 1.0);
+      float head = clamp(fxState, 0.40, 0.90);
+      // 两个高斯亮斑分居 head 与 1-head。head→0.5 时两斑**重合**,中心增益翻倍
+      // = 「接触后融合」的那一瞬闪光。
+      // ⚠ 平方一律写成 d*d,不用 GLSL 的幂函数 —— d 会变号,负底数在幂函数里未定义。
+      float dA = (vUv.x - head) * 13.0;
+      float dB = (vUv.x - (1.0 - head)) * 13.0;
+      float spots = (exp(-dA * dA) + exp(-dB * dB)) * clash;
+      // 中心余晖:比亮斑更宽更柔,是一团「已经融在一起」的光。它与下一轮的
+      // 两端亮斑**同时存在**(委托方:上一轮融合后下一轮即开始),故两者相加。
+      float dC = (vUv.x - 0.5) * 8.0;
+      float after = exp(-dC * dC) * clamp(fxFlow, 0.0, 1.0);
+      float lit = spots + after;
+      // 加性项必须钳制(夜闪纪律:网络内桥姿态相近,不受控的加性项会整网同爆)
+      col += min(vec3(0.95, 0.97, 1.0) * lit * 0.55, 0.34);
+      alpha = min(alpha + 0.50 * lit, 1.0);
+      // 融合后冒泡(与融合/暗流同一套气泡场:泡体暗 + 贴边亮环)
+      if (fxBubbleAmt > 0.001) {
+        vec2 bf = fxBubbleField(vUv, 10.0, uTime, vSeed);
+        col -= min(vec3(0.26, 0.31, 0.36) * (bf.x * fxBubbleAmt), col * 0.35);
+        col += min(vec3(0.62, 0.72, 0.85) * (bf.y * fxBubbleAmt), 0.20);
+        alpha = min(alpha * (1.0 + 0.55 * bf.y * fxBubbleAmt), 1.0);
+      }
+    } else {
+      // ---- 5 潜流:平时融入背景,被搅动才像泥沙般浮现 ----
+      // ⚠ **浮现阈值不能由时间驱动**。上一版把噪声按 uTime 滚动(… - vec2(uTime*0.6,0)),
+      //   于是没人碰鼠标时桥也自己一段段浮现/隐去 —— 委托方实测「并不受鼠标控制,
+      //   而是自行变化」。唯一的推进量必须是 reveal(= 指针到桥轴的距离)。
+      //   故:阈值场用**静态**噪声;§3.5 要的「流动的纹理」另取一层,且乘 reveal。
+      float reveal = clamp(fxState, 0.0, 1.0);
+      float nza = vnoise(vUv * vec2(18.0, 4.0));  // 静态:每点的浮现阈值
+      // 阈值铺满 (0.15, 0.88):reveal=0 时全部在阈值之上 → 整条融入背景;
+      // reveal=1 时全部被越过 → 整条浮现。+vUv.x 让 A 端先浮现(方向性)。
+      float tau = 0.15 + 0.55 * nza + 0.18 * vUv.x;
+      float emerge = smoothstep(tau - 0.11, tau + 0.11, reveal);
+      float m = 1.0 - emerge;                     // m = 融入背景的程度
+      col = mix(col, uSkyHorizon, m * 0.85);      // 未搅动 = 融入背景
+      alpha *= 1.0 - 0.85 * m;
+      // 浮现后的流动纹理:乘 reveal × emerge → 未搅动处完全静止,不会自己动
+      float nzb = vnoise(vUv * vec2(14.0, 4.0) - vec2(uTime * 0.35, 0.0));
+      col *= 1.0 + clamp((nzb - 0.5) * 0.6 * reveal * emerge, -0.12, 0.18);
+      // 搅动前沿的沉积物色带(把 dissolve 的边缘辉光换成泥沙色)
+      col += min(uBottomAlbedo * 0.55 * smoothstep(0.30, 0.0, abs(emerge - 0.5)), 0.20);
+    }
+  }
   col = applyGrade(col);
-  col = applyMist(col, vW);
-  // alpha × vFade:出场边缘软化(滴内主遮挡由液滴 depthWrite 深度剔除承担)
-  float alpha = mix(uBridgeOpacity, uBridgeHiOpacity, vEmph) * vFade;
-  gl_FragColor = vec4(col, alpha);
+  if (uNightDots <= 0.5) col = applyMist(col, vW);
+  // vFade(出场边缘软化)已在上方各时段分支内按生产原样乘入;此处只叠加
+  // vGrow(效果态的抽出/回缩;非效果态恒 1 → 与生产逐字节等价)
+  gl_FragColor = vec4(col, alpha * vGrow);
+}
+`,
+].join("\n");
+
+/** 雾团 billboard(web-fxspike B 组验证:凝结的「起雾」/ 死亡的「残留雾气」)。
+ *  池化 InstancedMesh + 单 draw call;噪声与 LUX_MIST_FRAG 同族(双频团涌),
+ *  共享 uniforms → 四时段配色免费继承。 */
+export const LUX_FOG_VERT = /* glsl */ `
+attribute float aFogAmt;
+varying vec2 vFogUv;
+varying float vFogAmt;
+void main() {
+  vFogUv = uv;
+  vFogAmt = aFogAmt;
+  vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`;
+
+export const LUX_FOG_FRAG = [
+  COMMON_UNIFORMS,
+  COMMON_HELPERS,
+  /* glsl */ `
+varying vec2 vFogUv;
+varying float vFogAmt;
+void main() {
+  if (vFogAmt < 0.004) discard; // 未激活的团不占混合填充(雾 shader 已有此写法)
+  vec2 p = vFogUv - 0.5;
+  float d = length(p) * 2.0;
+  // 双频絮丝(与 LUX_MIST_FRAG 同族):软边 + 团隙,避免读成「一个圆片」
+  float n = vnoise(vFogUv * 5.0 + vec2(uTime * 0.12, uTime * 0.07))
+          + 0.5 * vnoise(vFogUv * 11.0 - vec2(uTime * 0.09, 0.0));
+  float a = smoothstep(1.0, 0.12, d) * (0.35 + 0.85 * n);
+  if (a < 0.006) discard;
+  // 「微弱的水汽」而非实心云。⚠ 体色偏 uMistColor(灰)而不是偏天空:正午水面
+  // 本身就近白,白雾落上去等于没有对比(实测残雾几乎看不见)。alpha 上限 0.44。
+  vec3 col = mix(uMistColor, uSkyHorizon, 0.15) * (0.82 + 0.16 * n);
+  col = applyGrade(col);
+  gl_FragColor = vec4(col, a * vFogAmt * 0.44);
 }
 `,
 ].join("\n");
@@ -841,6 +1123,59 @@ void main() {
   vec3 col = uMistColor * 1.12; // 与 applyMist 同族(雾在 grade 之后混合,不做 grade)
   col *= mix(1.0, 0.42, uDim);  // 荱焦压暗与其他材质一致
   gl_FragColor = vec4(col, alpha);
+}
+`,
+].join("\n");
+
+// ============================================================
+// B 组效果验证 · 大转折「光点」(mode 9;web-fxspike)
+//
+// 光点 = 旧章液滴**炸裂**出来的纯光点(汇聚段:漩涡向心 → 被巨滴吸收)与
+// 巨滴炸裂后向外飞射的光点(爆散段)—— **同一池、同一材质**,只是方向相反
+// (委托方 2026-09-12:两段同物种;要求「纯粹的光点,体积小,易悬浮飘散」)。
+//
+// 与液滴/水珠的差别是**刻意**的:无菲涅尔边缘、无折射、无镜面高光 —— 只有
+// 「亮核 + 柔边」的发光点。核亮度越过 bloom 阈值(0.7)出光晕;**深夜切暖橙**
+// (= LUX_DROPLET_FRAG 夜色分支同色 vec3(1.0,0.70,0.30):「和原液滴一样」发光;
+// 不用 uNightDotColor —— 那是水底生物荧光蓝,语义不同)。
+// 片元输出**预乘 alpha**(col·a, a),配 viewer 的 One/OneMinusSrcAlpha 混合:
+// 柔边不产生暗环(soft particle 的标准解法)。
+// 生产路径(fxSource.sparkAt 未注入)下 sparkMesh.count = 0,零开销。
+// ============================================================
+
+export const LUX_POINT_VERT = [
+  COMMON_UNIFORMS,
+  /* glsl */ `
+attribute float aSparkA; // 出现度 0..1(逐实例;消隐交接用)
+varying float vA;
+varying float vRL;       // 单位几何的 xz 半径(0=中心,1=边缘)→ 径向衰减
+void main() {
+  vA = aSparkA;
+  vRL = length(position.xz);
+  vec4 wp = modelMatrix * instanceMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}
+`,
+].join("\n");
+
+export const LUX_POINT_FRAG = [
+  COMMON_UNIFORMS,
+  /* glsl */ `
+varying float vA;
+varying float vRL;
+void main() {
+  if (vA < 0.004) discard;
+  float rl = clamp(vRL, 0.0, 1.0);
+  // 「光点」的径向廓线:细亮核 + 宽淡晕(两瓣)。幂次越大该瓣越细。
+  // ⚠ **rgb 与 alpha 必须用同一条廓线**(下方 col·a / a):若 alpha 廓线宽于
+  //    颜色廓线,边缘会把背景压暗 → 读成「带暗边的小珠」(实测踩到)。
+  //    同廓之后任何半径都只增不减 + 常数亮色 > 背景 → 只亮不暗,才是「光」。
+  float fall = 0.55 * pow(1.0 - rl, 5.0) + 0.45 * pow(1.0 - rl, 1.6);
+  float a = vA * fall;
+  // 日间近白暖光 / 深夜暖橙(= 液滴夜色分支同色);核亮度 > bloom 阈值 0.7 → 出光晕
+  vec3 col = mix(vec3(1.0, 0.95, 0.85) * 1.5, vec3(1.0, 0.70, 0.30) * 1.25, uNightDots);
+  col *= mix(1.0, 0.42, uDim); // 压暗与其他材质一致(过渡段)
+  gl_FragColor = vec4(col * a, a); // 预乘 alpha(同廓;柔边不出现暗环)
 }
 `,
 ].join("\n");

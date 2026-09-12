@@ -113,3 +113,43 @@ describe("watersim/engine 固定步长门面", () => {
     expect(maxH).toBeLessThan(0.2);
   }, 60000);
 });
+
+describe("watersim/engine removeDroplet(死亡退场;B 组第二轮)", () => {
+  /** 两滴落定并成桥 */
+  function twoDrops(): WaterEngine {
+    const e = new WaterEngine(defaultParams);
+    for (const x of [0.38, 0.62]) {
+      e.spawnDroplet(x, 0.5, e.field.totalHeight(x, 0.5) + 0.03, 0.022);
+    }
+    for (let s = 0; s < 480; s++) e.stepFixed();
+    return e;
+  }
+
+  it("删掉一滴 → count 减一,且触该滴的桥被销毁(不留悬空端点)", () => {
+    const e = twoDrops();
+    expect(e.droplets.state.count).toBe(2);
+    expect(e.bridges.state.count).toBeGreaterThan(0);
+
+    expect(e.removeDroplet(1)).toBe(true);
+
+    const d = e.droplets.state;
+    const bs = e.bridges.state;
+    expect(d.count).toBe(1);
+    for (let k = 0; k < bs.count; k++) {
+      expect(bs.a[k]).toBeLessThan(d.count);
+      expect(bs.b[k]).toBeLessThan(d.count);
+    }
+  });
+
+  it("越界返回 false 且不改状态(幂等,重复调用安全)", () => {
+    const e = twoDrops();
+    expect(e.removeDroplet(2)).toBe(false);
+    expect(e.removeDroplet(-1)).toBe(false);
+    expect(e.droplets.state.count).toBe(2);
+    expect(e.removeDroplet(0)).toBe(true);
+    expect(e.droplets.state.count).toBe(1);
+    expect(e.removeDroplet(0)).toBe(true); // 还剩一滴(末位换入),可继续删
+    expect(e.droplets.state.count).toBe(0);
+    expect(e.removeDroplet(0)).toBe(false);
+  });
+});

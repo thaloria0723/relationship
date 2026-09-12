@@ -33,10 +33,14 @@ import {
   LUX_BOTTOM_VERT,
   LUX_BRIDGE_FRAG,
   LUX_BRIDGE_VERT,
+  LUX_FOG_FRAG,
+  LUX_FOG_VERT,
   LUX_DROPLET_FRAG,
   LUX_DROPLET_VERT,
   LUX_MIST_FRAG,
   LUX_MIST_VERT,
+  LUX_POINT_FRAG,
+  LUX_POINT_VERT,
   LUX_SURFACE_FRAG,
   LUX_SURFACE_VERT,
 } from "./luxShaders";
@@ -60,14 +64,116 @@ export const BRIDGE_TIP_DEEP = 0.45;
 /** aFade 起升点(距表面交点轴向距离的占比):0.8 = 滴内段前 80% 完全透明
  *  (委托方「隐藏进入液滴内部分」二次整改——旧 0.25 渐变横跨滴内段,ghost 可见;
  *  现仅出场边缘 ~20% 软化,主遮挡由液滴 depthWrite 深度剔除承担) */
+/**
+ * 液桥粗细的**视觉安全区间**(动效 §1.3「粗细限度·防失衡」)。
+ *
+ * 委托方 2026-09-11 明确:粗细映射**适用于所有液桥、不属于任何单个状态**,
+ * 且**必须限制在一定范围内**。故它的入口只有 `FxSource.bridgeThick()` 一个,
+ * 在 `syncBridges` 里对所有模式一律生效 —— 状态只改流动/气泡/光泽,不改粗细。
+ *  - 上限:关系再强也不会粗到喧宾夺主;
+ *  - 下限:真正的可读性下限是**颈径的屏幕空间下限**(screen-space floor),
+ *    它按像素而非按强度兜底,「关系再弱也不会细到肉眼无法分辨」(§1.3)。
+ */
+export const BRIDGE_THICK = { min: 0.55, max: 1.85, base: 1.0 } as const;
+
 export const BRIDGE_FADE_START = 0.8;
 export const BRIDGE_END_FRAC = 0.3;
 export const BRIDGE_NECK_FRAC = 0.05;
 export const BRIDGE_BLEND_EXTEND = 1.35;
 
+// ============================================================
+// B 组效果验证(web-fxspike):外部效果驱动源
+//
+// 本副本 = 生产 web/ 的拷贝,**只用于验证**,生产目录零改动。效果以「外部注入
+// 驱动源」的方式接入:未注入(null)时所有效果通道为 0,渲染路径与生产逐字节等价。
+// ============================================================
+
+/** 逐桥效果参数(与 fxspike/fxdriver.ts 的 BridgeFx 同形,此处不反向依赖) */
+export interface FxBridgeParams {
+  flow: number;
+  bubble: number;
+  turb: number;
+  state: number;
+}
+
+/** 逐滴效果参数 */
+export interface FxDropletParams {
+  boil: number;
+  dissolve: number;
+  scale: number;
+  lift: number;
+  flash: number;
+  /** 「未在场」灰滴度 0..1(聚焦模式:已退场/未出场 → 灰,且无动态关系表达)。
+   *  ⚠ 灰是**规格 §2.3 专门留给已退场/未出场**的语义色,疏远/拉扯不得借用。 */
+  absent: number;
+}
+
+/** 效果驱动源(由验证页注入;实现见 src/fxspike/) */
+export interface FxSource {
+  /** 效果族:0=无 1=流动/气泡 2=黯淡 3=湍流 4=潜流 */
+  bridgeKind(): number;
+  /** 逐桥参数(seed 为该桥随机相位) */
+  bridgeFx(seed: number): FxBridgeParams;
+  /** 桥抽出/回缩进度(0..1;seed 同上,大转折按桥错峰起卷/生长) */
+  bridgeGrow(seed: number): number;
+  /** 逐滴参数(index = 液滴索引;x/y = 引擎位域坐标,汇聚段螺旋偏移的出发点) */
+  dropletFx(index: number, x: number, y: number): FxDropletParams;
+  /** 雾团(凝结的「起雾」/ 死亡的「残留雾气」/ 大转折的「巨滴水汽包裹」;
+   *  cx/cy = 锚点滴渲染坐标) */
+  fogCue(
+    index: number,
+    cx: number,
+    cy: number,
+  ): { appear: number; radius: number; x: number; y: number };
+  /** 是否启用颈径屏幕空间下限(仅「拉扯」需要) */
+  neckFloorOn(): boolean;
+  /** 逐桥粗细系数(关系类型/强度 → 粗细;清单 A-2 的接入口)。
+   *  对所有桥、所有模式一律生效,并被 BRIDGE_THICK 的视觉安全区间钳住。 */
+  bridgeThick(seed: number): number;
+  /** 每帧推进(由 viewer 主循环调用) */
+  update(dt: number, pointerDist: number): void;
+  /** 雾团锚点滴索引(缺省 1 = 验证页主角滴;大转折的核心滴 = 0) */
+  fogAnchor?(): number;
+  /** 过渡整体压暗/增辉度 0..1(大转折过渡段;缺省 0) */
+  transitionMix?(): number;
+  /** 火花(大转折迸发段;缺省 = 无火花)。返回 null/不注入 → 该槽不画。 */
+  sparkAt?(
+    i: number,
+  ): { x: number; y: number; h: number; r: number; a: number } | null;
+}
+
+let fxSource: FxSource | null = null;
+
+/** 注入/清除效果驱动源(验证页专用;传 null 恢复生产路径) */
+export function setFxSource(s: FxSource | null): void {
+  fxSource = s;
+}
+
+/** 当前是否注入了效果驱动源 */
+export function fxActive(): boolean {
+  return fxSource !== null;
+}
+
 const WIRE_N = 64; // 线框降采样(§6:防糊)
 
 /** 确定性 PRNG(演示戳点序列;M4 演示脚本归入 demo.ts 后此处移除) */
+/** 点到线段距离(引擎域米;潜流揭示用)。桥轴 = 两端锚点线段,几乎笔直,
+ *  故不必在 shader 里做样条距离场 —— CPU 算完逐桥写 reveal 属性即可。 */
+function segDist(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const ux = bx - ax;
+  const uy = by - ay;
+  const ll = ux * ux + uy * uy;
+  const t = ll < 1e-12 ? 0 : Math.min(1, Math.max(0, ((px - ax) * ux + (py - ay) * uy) / ll));
+  return Math.hypot(px - (ax + ux * t), py - (ay + uy * t));
+}
+
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -94,6 +200,8 @@ function el<T extends HTMLElement>(id: string): T {
 // ============================================================
 
 interface LuxSystem {
+  /** 共享 uniforms 对象(五材质共用;大转折火花材质在装配块接入时用) */
+  uniforms: Record<string, THREE.IUniform>;
   surfaceMat: THREE.ShaderMaterial;
   dropletMat: THREE.ShaderMaterial;
   bridgeMat: THREE.ShaderMaterial;
@@ -103,11 +211,15 @@ interface LuxSystem {
   setTimeOfDay(tod: TimeOfDay): void;
   /** 烘焙缓冲(heightData)已更新后调用:置纹理上传标记 */
   updateHeight(): void;
-  /** 每渲染帧:时段渐变 + bloom 参数 + 时间/压暗 uniforms */
-  update(args: { dt: number; simTime: number; dim: number }): void;
+  /** 每渲染帧:时段渐变 + bloom 参数 + 时间/压暗 uniforms。
+   *  `glow` = B 组大转折的过渡增辉(直接加在 bloom 强度上;缺省 0)。 */
+  update(args: { dt: number; simTime: number; dim: number; glow?: number }): void;
   /** 漂浮液滴 → 水底解析软影 uniforms */
   setFloating(state: DropletState, half: number): void;
   resize(w: number, h: number): void;
+  /** B 组效果(web-fxspike):雾团 billboard 池 + 逐实例出现度(生产路径下恒 0) */
+  fogMesh: THREE.InstancedMesh;
+  fogAmt: THREE.InstancedBufferAttribute;
 }
 
 /** 液滴软影 uniform 池容量(= maxDroplets 范围上限) */
@@ -342,7 +454,31 @@ function createLuxSystem(opts: {
   setTarget(LIGHTING_PRESETS.dawn);
   snap();
 
+  // ---- B 组效果:雾团 billboard 池(web-fxspike) ----
+  // 池化 InstancedMesh + 单 draw call;renderOrder 7 = 液滴(5)之后、液桥(10)之前。
+  // 生产路径(未注入 FxSource)下 fogMesh.count = 0 → 零开销、不可见。
+  const FOG_MAX = 8;
+  const fogGeo = new THREE.PlaneGeometry(1, 1);
+  const fogAmt = new THREE.InstancedBufferAttribute(new Float32Array(FOG_MAX), 1);
+  fogGeo.setAttribute("aFogAmt", fogAmt);
+  const fogMat = new THREE.ShaderMaterial({
+    uniforms, // 共享 uniforms 对象:时段配色/光照自动跟随
+    vertexShader: LUX_FOG_VERT,
+    fragmentShader: LUX_FOG_FRAG,
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
+  const fogMesh = new THREE.InstancedMesh(fogGeo, fogMat, FOG_MAX);
+  fogMesh.frustumCulled = false;
+  fogMesh.renderOrder = 7;
+  fogMesh.count = 0;
+  scene.add(fogMesh);
+
   const sys: LuxSystem = {
+    uniforms,
+    fogMesh,
+    fogAmt,
     surfaceMat,
     dropletMat,
     bridgeMat,
@@ -357,7 +493,7 @@ function createLuxSystem(opts: {
     updateHeight(): void {
       heightTex.needsUpdate = true;
     },
-    update({ dt, simTime, dim }): void {
+    update({ dt, simTime, dim, glow = 0 }): void {
       const k = 1 - Math.exp(-Math.max(0, dt) / RENDER_PARAMS.presetLerpTau);
       uniforms.uSunDir.value.lerp(tSunDir, k).normalize();
       uniforms.uSunColor.value.lerp(cSun, k);
@@ -387,6 +523,7 @@ function createLuxSystem(opts: {
       bloom.strength += (target.bloomStrength - bloom.strength) * k;
       bloom.threshold += (target.bloomThreshold - bloom.threshold) * k;
       bloom.radius += (target.bloomRadius - bloom.radius) * k;
+      bloom.strength += glow; // 大转折过渡增辉(峰值 1.1,配置在验证页接线)
       bgBase.lerp(cBg, k);
       bgDim.copy(bgBase).multiplyScalar(1 - 0.55 * Math.min(1, dim));
       uniforms.uTime.value = simTime;
@@ -695,6 +832,18 @@ function mountViewer(
   let bridgeNrmAttr: THREE.BufferAttribute | null = null;
   let bridgeEmphAttr: THREE.BufferAttribute | null = null;
   let bridgeFadeAttr: THREE.BufferAttribute | null = null;
+  // B 组效果通道(web-fxspike)
+  let bridgeUvAttr: THREE.BufferAttribute | null = null;
+  let bridgeSeedAttr: THREE.BufferAttribute | null = null;
+  let bridgeKindAttr: THREE.BufferAttribute | null = null;
+  let bridgeStateAttr: THREE.BufferAttribute | null = null;
+  let bridgeGrowAttr: THREE.BufferAttribute | null = null;
+  let dropletFxAttr: THREE.InstancedBufferAttribute | null = null;
+  // 大转折火花池(lux 装配块内建;render 路径的 syncSparks 用)
+  let sparkMesh: THREE.InstancedMesh | null = null;
+  let sparkAmt: THREE.InstancedBufferAttribute | null = null;
+  /** 指针到最近桥轴的距离(引擎域米;潜流揭示用;每帧由 syncBridges 更新) */
+  let fxPointerDist = Infinity;
   const emphTarget = new Float32Array((params.maxDroplets * (params.maxDroplets - 1)) / 2);
   const emphCur = new Float32Array((params.maxDroplets * (params.maxDroplets - 1)) / 2);
 
@@ -748,18 +897,136 @@ function mountViewer(
       const lensThick = r * LENS_H * (1 - d.eps[i]!);
       // 聚焦隐藏:组外滴随 focusMix 平滑收缩到 0(几何消失;物理仍在仿真,退出即恢复)
       const vis = focusMask[i] === 1 ? 1 : 1 - focusMix;
-      dropletMatrix.makeScale(r * vis, lensThick * vis, r * vis);
-      dropletMatrix.setPosition(d.x[i]! - half, lensBottomY(i), d.y[i]! - half);
+      // B 组效果:凝结的成形缩放 / 死亡的汽化缩小与上飘 / 大转折的汇聚偏移。
+      // ⚠ vCenter(透镜采样基准)与 vR(透镜光程)都由 instanceMatrix 导出,
+      //    故缩放会同步带动透镜与接触环 —— 这是想要的(整颗滴一起变),
+      //    但**上飘只改 y 平移**:若在 shader 里单独偏移顶点,透镜会与本体错开。
+      let fxScale = 1;
+      let fxLift = 0;
+      if (fxSource) {
+        const f = fxSource.dropletFx(i, d.x[i]!, d.y[i]!);
+        fxScale = f.scale;
+        fxLift = f.lift;
+        if (dropletFxAttr) dropletFxAttr.setXYZ(i, f.boil, f.dissolve, f.absent);
+      } else if (dropletFxAttr) {
+        dropletFxAttr.setXYZ(i, 0, 0, 0);
+      }
+      const s = vis * fxScale;
+      dropletMatrix.makeScale(r * s, lensThick * s, r * s);
+      dropletMatrix.setPosition(
+        d.x[i]! - half,
+        lensBottomY(i) + fxLift,
+        d.y[i]! - half,
+      );
       dropletMesh.setMatrixAt(i, dropletMatrix);
       if (epsAttr) epsAttr.setX(i, d.eps[i]!);
     }
     dropletMesh.instanceMatrix.needsUpdate = true;
     if (epsAttr) epsAttr.needsUpdate = true;
+    if (dropletFxAttr) dropletFxAttr.needsUpdate = true;
+  };
+
+  /** B 组效果:雾团同步(凝结的起雾 / 死亡的残雾)。billboard = 相机朝向的方片,
+   *  故实例矩阵由「相机四元数 + 均匀缩放 + 位置」组装,保证任何机位都正对镜头。 */
+  const fogMatrix = new THREE.Matrix4();
+  const fogScale = new THREE.Vector3();
+  /** 主角滴渲染坐标缓存(液滴被删后残雾仍要留在原位,见 syncFog 注释) */
+  let heroX = 0;
+  let heroY = 0;
+  let heroZ = 0;
+  let heroValid = false;
+  const syncFog = (): void => {
+    if (!luxSys) return;
+    const mesh = luxSys.fogMesh;
+    const amt = luxSys.fogAmt;
+    if (!fxSource) {
+      mesh.count = 0;
+      return;
+    }
+    const d = engine.droplets.state;
+    // 锚点滴 = 验证页主角滴(索引 1);大转折(核心滴 = 索引 0)可指定。
+    // ⚠ 坐标要**缓存**:死亡退场会把液滴真的从引擎删掉(engine.removeDroplet),
+    //   删掉之后不能改读幸存滴的坐标 —— 那会让残雾「跳」到另一颗滴头上;也不能
+    //   用 d.count < 2 直接把雾掐掉 —— 「原位留下一团短暂的雾气」是死亡演出的
+    //   收尾(§4.2),雾必须比液滴活得久。
+    const hero = (fxSource?.fogAnchor?.() ?? 1) | 0;
+    if (hero < d.count) {
+      heroX = d.x[hero]! - half;
+      heroZ = d.y[hero]! - half;
+      heroY = lensBottomY(hero) + d.r[hero]! * 1.15;
+      heroValid = true;
+    } else if (!heroValid) {
+      mesh.count = 0;
+      return;
+    }
+    const hx = heroX;
+    const hz = heroZ;
+    const hy = heroY;
+    const cap = mesh.instanceMatrix.count;
+    let n = 0;
+    for (let i = 0; i < cap; i++) {
+      const cue = fxSource.fogCue(i, hx, hz);
+      if (cue.appear <= 0.004 || cue.radius <= 1e-5) continue;
+      fogMatrix.makeRotationFromQuaternion(camera.quaternion);
+      fogScale.set(cue.radius * 2, cue.radius * 2, 1);
+      fogMatrix.scale(fogScale);
+      fogMatrix.setPosition(cue.x, hy, cue.y);
+      mesh.setMatrixAt(n, fogMatrix);
+      amt.setX(n, cue.appear);
+      n++;
+    }
+    mesh.count = n;
+    if (n > 0) {
+      mesh.instanceMatrix.needsUpdate = true;
+      amt.needsUpdate = true;
+    }
+  };
+
+  /** 大转折火花同步:每帧把驱动源给的第 i 颗火花(引擎域坐标 + 水上高度)
+   *  写成实例矩阵(透镜几何按 r 缩放,贴 totalHeight 水位)。 */
+  const sparkMatrix = new THREE.Matrix4();
+  const syncSparks = (): void => {
+    if (!sparkMesh || !sparkAmt) return;
+    if (!fxSource?.sparkAt) {
+      sparkMesh.count = 0;
+      return;
+    }
+    let n = 0;
+    const cap = sparkMesh.instanceMatrix.count;
+    for (let i = 0; i < cap; i++) {
+      const s = fxSource.sparkAt(i);
+      if (!s || s.a <= 0.004 || s.r <= 1e-5) continue;
+      const surf = engine.field.totalHeight(s.x, s.y);
+      sparkMatrix.makeScale(s.r, s.r * LENS_H, s.r);
+      sparkMatrix.setPosition(s.x - half, surf + s.h, s.y - half);
+      sparkMesh.setMatrixAt(n, sparkMatrix);
+      sparkAmt.setX(n, s.a);
+      n++;
+    }
+    sparkMesh.count = n;
+    if (n > 0) {
+      sparkMesh.instanceMatrix.needsUpdate = true;
+      sparkAmt.needsUpdate = true;
+    }
   };
 
   // ---- 液桥渲染(任务①):颈状管(两端漏斗形放大、中间收窄;尖端在液滴内部) ----
-  const BRIDGE_LEN = 10; // 轴向环数
-  const BRIDGE_RAD = 8; // 周向边数
+  // ⚠ 原值 10 × 8 太粗,是「桥读成扁片 + 硬台阶」的根因(2026-09-11 B 组第二轮):
+  //   - 周向 8 边 → 剪影是八边形,带一条平顶棱面 → 无论怎么打光都读成「扁片」;
+  //   - 轴向 10 环 → 端部圆角(rise 只占跨距的 5.6%)与出场淡入(占 1.5%)都整个
+  //     落在**一段**之内,平滑过渡退化成一道硬台阶。
+  //   「拉扯」态看着平滑只是因为黯淡分支把棱面糊掉了 —— 不是它几何更好。
+  //   故把两者一起提上来:真正让所有状态都读成圆管、端部平滑收细。
+  const BRIDGE_LEN = 48; // 轴向环数
+  const BRIDGE_RAD = 20; // 周向边数
+  /** 周向单位圆 cos/sin 表(顶点布局静态 → 免掉每顶点三角函数;提高环数后必须) */
+  const ringCos = new Float32Array(BRIDGE_RAD);
+  const ringSin = new Float32Array(BRIDGE_RAD);
+  for (let r = 0; r < BRIDGE_RAD; r++) {
+    const ang = (r / BRIDGE_RAD) * Math.PI * 2;
+    ringCos[r] = Math.cos(ang);
+    ringSin[r] = Math.sin(ang);
+  }
   /** clamp 到 [0,1] 后 smoothstep 缓动 */
   const smooth01 = (u: number): number => {
     const v = Math.min(1, Math.max(0, u));
@@ -778,6 +1045,10 @@ function mountViewer(
   // 桥池 = 完全图边数(连接语义:任意两漂浮滴都可成桥;须与 BridgeSystem 容量一致)
   const bridgeMax = (params.maxDroplets * (params.maxDroplets - 1)) / 2;
   const vertsPerBridge = (BRIDGE_LEN + 1) * BRIDGE_RAD;
+  // 逐桥「上一帧是否可见」。桥池按完全图容量分配(maxDroplets=32 → 496 条),
+  // 实际几乎全是不可见的空槽;顶点数提高后每帧无条件清零 496×vertsPerBridge
+  // 会白烧掉大半帧时间,故只在「由可见转不可见」那一帧清一次。
+  const bridgeWasActive = new Uint8Array(bridgeMax);
   const bridgeGeo = new THREE.BufferGeometry();
   const bridgePos = new Float32Array(bridgeMax * vertsPerBridge * 3);
   const bridgeIdx: number[] = [];
@@ -815,14 +1086,13 @@ function mountViewer(
       const base = k * vertsPerBridge;
       const active = k < bs.count && bs.cut[k] === 0;
       if (!active) {
+        if (bridgeWasActive[k] === 0) continue; // 本来就不可见:顶点已在原点,无需再清
+        bridgeWasActive[k] = 0;
         // 收缩到原点(不可见)
-        for (let v = 0; v < vertsPerBridge; v++) {
-          bridgePos[(base + v) * 3] = 0;
-          bridgePos[(base + v) * 3 + 1] = 0;
-          bridgePos[(base + v) * 3 + 2] = 0;
-        }
+        bridgePos.fill(0, base * 3, (base + vertsPerBridge) * 3);
         continue;
       }
+      bridgeWasActive[k] = 1;
       const ia = bs.a[k]!;
       const ib = bs.b[k]!;
       // 聚焦隐藏(需求①):与包围圈无关的桥随 focusMix 收缩;≥0.98 直接折叠
@@ -839,7 +1109,7 @@ function mountViewer(
         continue;
       }
       // 端点 = 液滴渲染锚点(透镜中面,与 syncDroplets 完全同源——液桥始终
-      // 从液滴表面长出来,贴水/悬浮/退场曲线三态都不脱节)
+      // 从液滴表面长出来,贴水/悬浮/退场曲线三态都不脱节)。
       const ax = d.x[ia]! - half;
       const az = d.y[ia]! - half;
       const ay = lensMidYCached(ia);
@@ -883,7 +1153,42 @@ function mountViewer(
       // - 拉伸变细:半径 ×√(restLen/dist)(体积守恒观感,拉伸成细丝而不断裂)
       const ra = d.r[ia]!;
       const rb = d.r[ib]!;
-      const rNeck = BRIDGE_NECK_FRAC * Math.min(ra, rb);
+      // ---- 颈径屏幕空间下限(「拉扯」专用;B 组效果验证) ----
+      // 圆柱之所以读作圆柱,靠的是径向明暗带(高光带/亮面/明暗交界/反光)在空间上
+      // **分离**;宽度掉到 ~2px 以下这些带就合并、被 MSAA 抹平,只剩剪影 ——
+      // 无论调成什么颜色都只能读成「薄片」。这正是「极限拉扯 = 又黑又扁的刀片」
+      // 的真正根因:它不是调色问题,是几何/像素问题。
+      // 故设下限 ≈2.6px,「极细」的**读法**改由「端/颈比」承担(端 3.8~10.6px
+      // vs 颈 2.6px → 1.5~4×),而不是绝对变细。
+      const worldPerPx =
+        (2 * Math.tan((camera.fov * Math.PI) / 360) *
+          camera.position.distanceTo(controls.target)) /
+        Math.max(window.innerHeight, 1);
+      const neckFloor =
+        fxSource && fxSource.neckFloorOn() ? 2.6 * worldPerPx : 0;
+      const seedK = bridgeSeedAttr
+        ? (bridgeSeedAttr.array as Float32Array)[k * vertsPerBridge]!
+        : 0;
+      /** 桥的抽出/回缩进度(0..1;非效果态恒 1) */
+      const fxGrow = fxSource ? fxSource.bridgeGrow(seedK) : 1;
+      // 逐桥效果参数(seed 相同 → 与属性写入段一致;大转折的卷曲幅度从这取)
+      const pFx = fxSource ? fxSource.bridgeFx(seedK) : null;
+      /** 卷曲位移幅度(动效 §5 汇聚段「线条随之卷曲、缠绕」):横向正弦缠绕,
+       *  两端固定(中段最大),相位含 seed 与 simTime —— 缠绕是活的。 */
+      const curlAmp = pFx ? pFx.turb : 0;
+      // 粗细系数:关系类型/强度 → 粗细的唯一入口(对所有桥、所有模式一律生效),
+      // 被 §1.3 的视觉安全区间钳住 —— 「关系再强不会喧宾夺主」。
+      const thickK = Math.min(
+        BRIDGE_THICK.max,
+        Math.max(
+          BRIDGE_THICK.min,
+          fxSource ? fxSource.bridgeThick(seedK) : BRIDGE_THICK.base,
+        ),
+      );
+      const rNeck = Math.max(
+        BRIDGE_NECK_FRAC * Math.min(ra, rb) * thickK,
+        neckFloor,
+      );
       const thin = Math.min(
         1.25,
         Math.max(0.5, Math.sqrt(bs.restLen[k]! / len)),
@@ -904,7 +1209,8 @@ function mountViewer(
       const pbz = bz - uz * tipB;
       for (let s = 0; s <= BRIDGE_LEN; s++) {
         const t = s / BRIDGE_LEN;
-        const rEnd = t < 0.5 ? BRIDGE_END_FRAC * ra : BRIDGE_END_FRAC * rb;
+        const rEnd =
+          (t < 0.5 ? BRIDGE_END_FRAC * ra : BRIDGE_END_FRAC * rb) * thickK;
         const free = rNeck + (rEnd - rNeck) * Math.abs(2 * t - 1) ** 1.5;
         // lux:高亮加粗(委托方「变亮加粗」;灰模无此属性,因子=1)
         const emph = bridgeEmphAttr ? emphCur[k]! : 0;
@@ -913,8 +1219,30 @@ function mountViewer(
         const dA = t * span; // 距 A 端尖端的轴向距离
         const dB = (1 - t) * span;
         const rise = Math.min(smooth01(dA / blendA), smooth01(dB / blendB));
-        const rr =
-          Math.max(free * rise * thin * thick * visK, 1e-5);
+        // Rayleigh–Plateau 珠化(「拉扯」专用):真实液柱断裂前会出现周期性
+        // 颈缩-鼓包。它比「整体变细」更像液体(有体积、有明暗带、可读),且
+        // **始终连着** —— 与「液桥拉伸不断裂」裁决完全兼容。
+        // ⚠ 只调制中段:rise 在两端→0,乘上去天然不碰尖端,保住「两头粗中间细」。
+        // (珠化只在「拉扯」启用;颈径下限可独立常开 —— 见 main.ts 的说明)
+        const bead =
+          fxSource?.bridgeKind() === 2
+            ? 1 + 0.18 * Math.sin(t * 9.0 + seedK * 6.283)
+            : 1;
+        // 「抽出 / 回缩」= **几何生长**,不是 alpha 淡入。
+        // 桥的半径每帧由 CPU 重建,所以生长必须做在这里:沿弧长从 A 端(t=0)向
+        // B 端(t=1)推进,已长出的段取满径,未到的段半径为 0。
+        // 效果态的 grow 由驱动源给出(凝结 0→1 抽出、死亡 1→0 回缩);非效果态恒 1。
+        const growLocal =
+          fxGrow >= 1
+            ? 1
+            : 1 - smooth01((t - (fxGrow - 0.18)) / 0.18);
+        // ⚠ **不要**在这里对 rr 再夹 neckFloor:那会把锥形尖端一起抬到下限,
+        //    整条桥变成粗圆棒(实测:锥形消失、桥明显变胖变匀)。颈径下限只应
+        //    改轮廓参数 rNeck(见上方),不能夹最终半径。
+        const rr = Math.max(
+          free * rise * thin * thick * visK * bead * growLocal,
+          1e-5,
+        );
         // 出场边缘软化:交点前 FADE_START 段全透明 → 交点处升满(主遮挡由
         // 液滴 depthWrite 深度剔除承担,见 dropletMat)
         const fade = Math.min(
@@ -925,13 +1253,27 @@ function mountViewer(
             (dB / surfB - BRIDGE_FADE_START) / (1 - BRIDGE_FADE_START),
           ),
         );
-        const cx = pax + (pbx - pax) * t;
-        const cy = pay + (pby - pay) * t;
-        const cz = paz + (pbz - paz) * t;
+        const cx0 = pax + (pbx - pax) * t;
+        const cy0 = pay + (pby - pay) * t;
+        const cz0 = paz + (pbz - paz) * t;
+        // 卷曲缠绕(大转折汇聚段):沿正交基叠加双频横向位移,包络 sin(πt)
+        // 让两端钉在液滴上;幅度 ∝ turb × 桥长,seed/simTime 各给一相。
+        let cx = cx0;
+        let cy = cy0;
+        let cz = cz0;
+        if (curlAmp > 1e-4) {
+          const env = Math.sin(Math.PI * t);
+          const ph = seedK * 6.2832 + engine.stats.simTime * 7.0;
+          const amp = curlAmp * len * 0.16 * env;
+          const w1 = Math.sin(ph + t * 8.5);
+          const w2 = Math.cos(ph * 1.3 + t * 6.2);
+          cx += n1x * amp * w1 + n2x * amp * 0.45 * w2;
+          cy += n1y * amp * w1 + n2y * amp * 0.45 * w2;
+          cz += n1z * amp * w1 + n2z * amp * 0.45 * w2;
+        }
         for (let r = 0; r < BRIDGE_RAD; r++) {
-          const ang = (r / BRIDGE_RAD) * Math.PI * 2;
-          const c = Math.cos(ang);
-          const s2 = Math.sin(ang);
+          const c = ringCos[r]!;
+          const s2 = ringSin[r]!;
           const ox = c * rr;
           const oy = s2 * rr;
           const vi = (base + s * BRIDGE_RAD + r) * 3;
@@ -955,11 +1297,66 @@ function mountViewer(
         const ea = bridgeEmphAttr.array as Float32Array;
         ea.fill(emphCur[k]!, base, base + vertsPerBridge);
       }
+      // ---- B 组效果通道写入(逐桥;未注入驱动源时 aKind=0 且各通道 0) ----
+      if (bridgeKindAttr && bridgeStateAttr && bridgeGrowAttr) {
+        const ka = bridgeKindAttr.array as Float32Array;
+        const sa = bridgeStateAttr.array as Float32Array;
+        const ga = bridgeGrowAttr.array as Float32Array;
+        const p = pFx;
+        const kind = fxSource ? fxSource.bridgeKind() : 0;
+        const grow = fxGrow;
+        for (let v = 0; v < vertsPerBridge; v++) {
+          const vi = base + v;
+          ka[vi] = kind;
+          ga[vi] = grow;
+          const q = vi * 4;
+          sa[q] = p ? p.flow : 0;
+          sa[q + 1] = p ? p.bubble : 0;
+          sa[q + 2] = p ? p.turb : 0;
+          sa[q + 3] = p ? p.state : 0;
+        }
+      }
     }
+    // 只提交「已分配」的桥槽(索引按桥号连续排布)。桥池按完全图容量分配
+    // (maxDroplets=32 → 496 条),不设 drawRange 时每帧要把整池的退化三角形
+    // 都送进 GPU —— 环数提高后这是 95 万个三角形,必须限。
+    bridgeGeo.setDrawRange(
+      0,
+      Math.min(bs.count, bridgeMax) * BRIDGE_LEN * BRIDGE_RAD * 6,
+    );
     bridgePosAttr.needsUpdate = true;
     if (bridgeNrmAttr) bridgeNrmAttr.needsUpdate = true;
     if (bridgeEmphAttr) bridgeEmphAttr.needsUpdate = true;
     if (bridgeFadeAttr) bridgeFadeAttr.needsUpdate = true;
+    if (bridgeKindAttr) bridgeKindAttr.needsUpdate = true;
+    if (bridgeStateAttr) bridgeStateAttr.needsUpdate = true;
+    if (bridgeGrowAttr) bridgeGrowAttr.needsUpdate = true;
+    // 潜流用:指针到最近桥轴的距离(引擎域米)。桥轴 = 两端锚点线段,几乎笔直,
+    // 用点到线段距离即可 —— 不必在 shader 里做样条距离场(那是纯浪费)。
+    // ⚠ 指针失效时必须**回落成 Infinity**,不能沿用上一帧的值:原实现整个块被
+    //   `pointerValid` 门掉,指针一离开画布 fxPointerDist 就冻结在最后那个距离上
+    //   → 潜流「搅动后沉淀」永远不发生,桥停在浮现态(委托方实测:不受鼠标控制)。
+    if (fxSource) {
+      let best = Infinity;
+      const n = pointerValid ? Math.min(bs.count, bridgeMax) : 0;
+      for (let k = 0; k < n; k++) {
+        if (bs.cut[k] !== 0) continue;
+        const ia = bs.a[k]!;
+        const ib = bs.b[k]!;
+        best = Math.min(
+          best,
+          segDist(
+            pointerWorldX,
+            pointerWorldY,
+            d.x[ia]!,
+            d.y[ia]!,
+            d.x[ib]!,
+            d.y[ib]!,
+          ),
+        );
+      }
+      fxPointerDist = best;
+    }
   };
 
   const syncWireVisibility = (): void => {
@@ -1054,6 +1451,93 @@ function mountViewer(
       1,
     );
     bridgeGeo.setAttribute("aFade", bridgeFadeAttr);
+    // ---- B 组效果通道(web-fxspike) ----
+    // aUV / aSeed 是**静态**属性:顶点布局静态(每帧只改 position),故 init 填一次
+    // 即可,每帧零成本。aState / aKind / aGrow 每帧写。
+    bridgeUvAttr = new THREE.BufferAttribute(
+      new Float32Array(bridgeMax * vertsPerBridge * 2),
+      2,
+    );
+    bridgeSeedAttr = new THREE.BufferAttribute(
+      new Float32Array(bridgeMax * vertsPerBridge),
+      1,
+    );
+    bridgeKindAttr = new THREE.BufferAttribute(
+      new Float32Array(bridgeMax * vertsPerBridge),
+      1,
+    );
+    bridgeStateAttr = new THREE.BufferAttribute(
+      new Float32Array(bridgeMax * vertsPerBridge * 4),
+      4,
+    );
+    bridgeGrowAttr = new THREE.BufferAttribute(
+      new Float32Array(bridgeMax * vertsPerBridge),
+      1,
+    );
+    {
+      const uv = bridgeUvAttr.array as Float32Array;
+      const sd = bridgeSeedAttr.array as Float32Array;
+      const gw = bridgeGrowAttr.array as Float32Array;
+      const rngSeed = mulberry32(0x9e3779b9);
+      for (let k = 0; k < bridgeMax; k++) {
+        const base = k * vertsPerBridge;
+        const seedK = rngSeed(); // 每桥不同相位 → 去同步(防整网同步扫过半向量)
+        for (let s = 0; s <= BRIDGE_LEN; s++) {
+          for (let r = 0; r < BRIDGE_RAD; r++) {
+            const vi = base + s * BRIDGE_RAD + r;
+            uv[vi * 2] = s / BRIDGE_LEN;
+            uv[vi * 2 + 1] = r / BRIDGE_RAD;
+            sd[vi] = seedK;
+            // ⚠ 默认必须是 1:若该属性缺失或为 0,片元里 alpha × vGrow = 0 → 桥全隐
+            gw[vi] = 1;
+          }
+        }
+      }
+    }
+    bridgeGeo.setAttribute("aUV", bridgeUvAttr);
+    bridgeGeo.setAttribute("aSeed", bridgeSeedAttr);
+    bridgeGeo.setAttribute("aKind", bridgeKindAttr);
+    bridgeGeo.setAttribute("aState", bridgeStateAttr);
+    bridgeGeo.setAttribute("aGrow", bridgeGrowAttr);
+    // 逐实例效果通道:aFx = (沸腾强度, 抖动溶解进度, 未在场灰滴度)
+    dropletFxAttr = new THREE.InstancedBufferAttribute(
+      new Float32Array(params.maxDroplets * 3),
+      3,
+    );
+    dropletMesh.geometry.setAttribute("aFx", dropletFxAttr);
+    // ---- 大转折光点池(web-fxspike mode 9) ----
+    // 两用:**汇聚段炸裂出来的光点**(漩涡向心、被巨滴吸收)与**爆散段的光点**
+    // (巨滴炸裂后向四周飞射)。同一池、同一材质(纯光点:亮核 + 柔边,无菲涅尔/
+    // 折射/高光;深夜暖橙发光 —— 委托方 2026-09-12 两条整改)。容量 = fxdriver 的
+    // POINT_POOL(160;爆散段仍只用前 48 槽)。复用液滴透镜几何(clone:追加
+    // aSparkA 属性,不污染液滴本体)。生产路径(sparkAt 未注入)count=0,零开销。
+    {
+      const SPARK_MAX = 160;
+      const sparkGeo = lensGeo.clone();
+      const amt = new THREE.InstancedBufferAttribute(
+        new Float32Array(SPARK_MAX),
+        1,
+      );
+      sparkGeo.setAttribute("aSparkA", amt);
+      const mat = new THREE.ShaderMaterial({
+        uniforms: luxSys!.uniforms, // 共享:时段配色/uNightDots/uDim 自动跟随
+        vertexShader: LUX_POINT_VERT,
+        fragmentShader: LUX_POINT_FRAG,
+        transparent: true,
+        depthWrite: false, // 光点是瞬时演出物,不参与遮挡
+        // 预乘 alpha:片元输出 (col·a, a) → 柔边不产生暗环(soft particle 标准解法)
+        blending: THREE.CustomBlending,
+        blendSrc: THREE.OneFactor,
+        blendDst: THREE.OneMinusSrcAlphaFactor,
+      });
+      const mesh = new THREE.InstancedMesh(sparkGeo, mat, SPARK_MAX);
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 6; // 液滴(5)之后、雾团(7)/液桥(10)之前
+      mesh.count = 0;
+      scene.add(mesh);
+      sparkMesh = mesh;
+      sparkAmt = amt;
+    }
     // 预建 instanceColor 缓冲(USE_INSTANCING_COLOR 需在首帧编译前存在)
     const white = new THREE.Color(1, 1, 1);
     for (let i = 0; i < params.maxDroplets; i++) dropletMesh.setColorAt(i, white);
@@ -1435,6 +1919,10 @@ function mountViewer(
         engine.setDropletHover(-1);
       }
       engine.advance(frameDt);
+      // B 组效果:由**物理时间源**驱动(不引第二时钟;引擎是唯一时间源)。
+      // 放在 engine.advance 之后、syncBridges 之前 —— 参数由上一帧 syncBridges
+      // 算出的指针距离更新,一帧延迟对「靠近才浮现」的观感无影响。
+      fxSource?.update(frameDt, fxPointerDist);
       // 相机缓动 + 灰度压暗/高亮
       if (camAnim) {
         camAnim.t += frameDt;
@@ -1468,6 +1956,8 @@ function mountViewer(
       }
       updateWire();
       syncDroplets();
+      syncFog();
+      syncSparks();
       // 桥高亮目标(委托方需求 a):激活滴=拖拽/悬停目标,聚焦=中心直连桥
       if (luxSys) {
         const bs = engine.bridges.state;
@@ -1494,10 +1984,14 @@ function mountViewer(
       }
       syncBridges();
       if (luxSys) {
+        // 大转折过渡段:整体压暗(uDim)+ bloom 增辉 → 「巨滴悬停 + 水下焦散式
+        // 模糊」的观感;未注入 transitionMix 时与原路径完全一致。
+        const transMix = fxSource?.transitionMix?.() ?? 0;
         luxSys.update({
           dt: frameDt,
           simTime: engine.stats.simTime,
-          dim: focusMix,
+          dim: Math.max(focusMix, transMix),
+          glow: transMix * 0.45, // 克制(夜闪纪律):曾用 1.1,整帧泛白(实测)
         });
         luxSys.setFloating(engine.droplets.state, half);
         luxSys.composer.render();
@@ -1561,6 +2055,36 @@ function mountViewer(
     get controller() {
       return controller;
     },
+    /** 指针到最近桥轴的距离(引擎域米;Infinity = 指针不在画布内)。
+     *  潜流验证用:取帧环境没有真鼠标,得能读到「鼠标驱动了什么」。 */
+    get pointerDist() {
+      return fxPointerDist;
+    },
+    /** 手动重算「指针世界坐标 + 液桥几何 + 指针距离」。
+     *  取帧时需要:hooks.tick 跑在 syncBridges **之前**,暂停后又不再来新帧,
+     *  不显式调一次的话驱动器读到的永远是上一帧(或初始)的距离。
+     *  另外必须**先更新相机矩阵** —— camera.matrixWorld 是 render 时才刷新的,
+     *  首帧 tick 之前它还是旧的,unproject 会解出域外坐标(实测 dist=9.29m)。 */
+    sync(): void {
+      camera.updateMatrixWorld(true);
+      if (pointerValid) {
+        const w = pointerToWorld(pointerSX, pointerSY);
+        if (w) {
+          pointerWorldX = w.x;
+          pointerWorldY = w.y;
+        }
+      }
+      // 顺序:先液滴(写逐滴偏移缓存)→ 再桥(端点读缓存)→ 最后雾/火花
+      // (雾锚点要读液滴坐标)。原本桥在滴前,大转折的偏移会晚一帧,
+      // 取帧路径整场压进一帧时会拿到全零偏移 → 桥留在原位(实测级风险)。
+      syncDroplets();
+      syncBridges();
+      syncFog();
+      syncSparks();
+      // 液滴/雾也要一起同步:取帧路径把整场压进一帧,而「死亡退场」会在
+      // hooks.tick 里删掉液滴 —— 删除发生在本帧 syncDroplets 之前的话,
+      // 主角滴坐标缓存就永远填不上,残雾会整团消失(实测踩到)。
+    },
     get camera() {
       return camera;
     },
@@ -1576,11 +2100,14 @@ function mountViewer(
     get scene() {
       return scene;
     },
-    screenOf(i: number): [number, number, number] {
+    /** 液滴 i 的屏幕投影 [x, y, 半径px]。`lift` = 该滴的浮升量(米)—— 灰滴从
+     *  水底浮现时渲染位是引擎位 + lift(instanceMatrix 的 Y 平移),文字叠层要
+     *  跟着**渲染位**走,不传则与引擎位一致(死亡上飘同理可传正值)。 */
+    screenOf(i: number, lift = 0): [number, number, number] {
       const d = engine.droplets.state;
       const v = new THREE.Vector3(
         d.x[i]! - half,
-        d.z[i]!,
+        d.z[i]! + lift,
         d.y[i]! - half,
       );
       const dist = camera.position.distanceTo(v);
