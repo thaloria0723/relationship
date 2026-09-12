@@ -88,7 +88,8 @@ export const BRIDGE_BLEND_EXTEND = 1.35;
 // 驱动源」的方式接入:未注入(null)时所有效果通道为 0,渲染路径与生产逐字节等价。
 // ============================================================
 
-/** 逐桥效果参数(与 fxspike/fxdriver.ts 的 BridgeFx 同形,此处不反向依赖) */
+/** 逐桥效果参数(与效果驱动源的 BridgeFx 同形;驱动实现随验证页于 2026-09-12
+ *  留档后移除,见 `docs/会话交接-2026-09-12.md` §14——本接口即接入面) */
 export interface FxBridgeParams {
   flow: number;
   bubble: number;
@@ -108,7 +109,7 @@ export interface FxDropletParams {
   absent: number;
 }
 
-/** 效果驱动源(由验证页注入;实现见 src/fxspike/) */
+/** 效果驱动源(由宿主注入;未注入 = 原生产路径,逐字节等价) */
 export interface FxSource {
   /** 效果族:0=无 1=流动/气泡 2=黯淡 3=湍流 4=潜流 */
   bridgeKind(): number;
